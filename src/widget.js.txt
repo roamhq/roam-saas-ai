@@ -1,0 +1,473 @@
+/**
+ * Roam AI Explainability Widget
+ *
+ * Drop this into the browser console on any Roam-powered website.
+ * Auto-detects the tenant from the current hostname via the AI worker.
+ * Streams explanations about why the page shows certain listings.
+ *
+ * Usage:
+ *   1. Navigate to a Roam-powered tourism website
+ *   2. Open Chrome DevTools console
+ *   3. Paste this entire script and press Enter
+ *   4. Click the floating button bottom-right
+ *   5. Ask a question like "Why do these products show here?"
+ */
+(() => {
+  // --- Config -----------------------------------------------------------
+  // When loaded via <script src="...worker.dev/widget.js">, auto-detect the API base.
+  // When pasted in console, fall back to the hardcoded URL.
+  const _src = document.currentScript?.src;
+  const API_BASE = _src ? new URL(_src).origin : "https://roam-saas-ai.cloudflare-roamhq.workers.dev";
+  const HOSTNAME = window.location.hostname;
+  const PAGE_URI = window.location.pathname;
+  const BRAND = "rgb(241, 115, 123)";       // Roam coral
+  const BRAND_DARK = "rgb(210, 85, 93)";      // darker shade for hover
+  const BRAND_LIGHT = "rgb(248, 155, 161)";    // lighter shade
+
+  // --- State ------------------------------------------------------------
+  let tenant = null;
+  let isOpen = false;
+  let isLoading = false;
+
+  // --- Styles -----------------------------------------------------------
+  const STYLES = `
+    #rai, #rai *, #rai *::before, #rai *::after { box-sizing: border-box; }
+    #rai { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; font-size: 14px; line-height: 1.5; color: #1e293b; -webkit-font-smoothing: antialiased; margin: 0; padding: 0; }
+
+    /* FAB */
+    #rai-fab {
+      position: fixed; bottom: 24px; right: 24px; z-index: 99999;
+      width: 52px; height: 52px; border-radius: 50%;
+      background: ${BRAND}; color: #000; border: none; cursor: pointer;
+      box-shadow: 0 4px 14px rgba(0,0,0,.2);
+      transition: transform .2s cubic-bezier(.19,1,.22,1), box-shadow .2s;
+      display: flex; align-items: center; justify-content: center;
+    }
+    #rai-fab:hover { transform: scale(1.06); box-shadow: 0 6px 20px rgba(0,0,0,.25); }
+    #rai-fab svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+    /* Panel */
+    #rai-panel {
+      position: fixed; bottom: 88px; right: 24px; z-index: 99999;
+      width: 420px; height: 560px;
+      background: #fff; border-radius: 20px;
+      box-shadow: 0 8px 32px rgba(0,0,0,.16), 0 0 0 1px rgba(0,0,0,.04);
+      display: flex; flex-direction: column;
+      overflow: hidden;
+      transition: opacity .2s, transform .2s cubic-bezier(.19,1,.22,1);
+    }
+    #rai-panel.hidden { opacity: 0; transform: translateY(12px) scale(.97); pointer-events: none; }
+
+    /* Header */
+    #rai-hdr {
+      padding: 16px 20px; color: #000;
+      background: linear-gradient(0deg, rgba(0,0,0,.02) 0.44%, rgba(0,0,0,0) 49.5%), ${BRAND};
+      display: flex; justify-content: space-between; align-items: center;
+      flex-shrink: 0;
+    }
+    #rai-hdr-left { display: flex; align-items: center; gap: 10px; }
+    #rai-hdr-icon {
+      width: 32px; height: 32px; border-radius: 50%;
+      background: rgba(255,255,255,.2); border: 1px solid rgba(255,255,255,.1);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 16px;
+    }
+    #rai-hdr h3 { font-size: 14px; font-weight: 600; letter-spacing: -0.01em; }
+    #rai-tenant { font-size: 11px; color: rgba(0,0,0,.5); margin-top: 1px; }
+    #rai-close {
+      background: none; border: none; color: rgba(0,0,0,.4); cursor: pointer;
+      width: 28px; height: 28px; border-radius: 6px;
+      display: flex; align-items: center; justify-content: center;
+      transition: color .15s, background .15s;
+    }
+    #rai-close:hover { color: #000; background: rgba(0,0,0,.06); }
+    #rai-close svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; }
+
+    /* Messages area */
+    #rai-msgs {
+      flex: 1; overflow-y: auto; padding: 20px;
+      display: flex; flex-direction: column; gap: 20px;
+      scroll-behavior: smooth;
+      box-shadow: inset 0 1px 2px rgba(0,0,0,.04);
+    }
+    #rai-msgs::-webkit-scrollbar { width: 4px; }
+    #rai-msgs::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+    #rai-msgs::-webkit-scrollbar-track { background: transparent; }
+
+    /* Message bubbles */
+    .rai-row { display: flex; flex-direction: column; max-width: min(92%, 65ch); }
+    .rai-row.user { align-self: flex-end; align-items: flex-end; max-width: min(85%, 50ch); }
+    .rai-row.ai { align-self: flex-start; align-items: flex-start; }
+    .rai-row.system { align-self: center; max-width: 100%; }
+
+    .rai-bubble {
+      padding: 12px 16px; border-radius: 20px;
+      font-size: 14px; line-height: 1.5; letter-spacing: -0.01em;
+      word-break: break-word; overflow-wrap: anywhere;
+    }
+    .rai-row.user .rai-bubble {
+      background: ${BRAND}; color: #000;
+      border-bottom-right-radius: 6px;
+      white-space: pre-wrap;
+    }
+    .rai-row.ai .rai-bubble {
+      background: #f1f5f9; color: #1e293b;
+      border-bottom-left-radius: 6px;
+    }
+    .rai-row.system .rai-bubble {
+      background: transparent; color: #94a3b8; font-size: 12px;
+      text-align: center; padding: 4px 12px;
+    }
+    .rai-row.error .rai-bubble {
+      background: #fef2f2; color: #991b1b;
+      border-bottom-left-radius: 6px;
+    }
+
+    /* Prose styling for AI responses */
+    .rai-bubble p { margin: 0.75em 0; }
+    .rai-bubble p:first-child { margin-top: 0; }
+    .rai-bubble p:last-child { margin-bottom: 0; }
+    .rai-bubble strong, .rai-bubble b { font-weight: 600; color: #0f172a; }
+    .rai-bubble ul, .rai-bubble ol { margin: 0.5em 0; padding-left: 1.5em; }
+    .rai-bubble ul { list-style: disc; }
+    .rai-bubble ol { list-style: decimal; }
+    .rai-bubble li { margin-top: 0.25em; }
+    .rai-bubble li + li { margin-top: 0.35em; }
+    .rai-bubble a { color: #2563eb; text-decoration: underline; }
+    .rai-bubble a:hover { color: #1d4ed8; }
+    .rai-bubble code { background: rgba(0,0,0,.06); padding: 1px 4px; border-radius: 4px; font-size: 0.9em; }
+    .rai-bubble h2, .rai-bubble h3, .rai-bubble h4 { font-weight: 600; color: #0f172a; margin: 0.75em 0 0.25em; font-size: 13px; }
+    .rai-bubble h2:first-child, .rai-bubble h3:first-child { margin-top: 0; }
+
+    /* Typing cursor */
+    .rai-typing .rai-bubble::after {
+      content: ''; display: inline-block; width: 2px; height: 15px;
+      background: #64748b; margin-left: 1px; vertical-align: text-bottom;
+      animation: rai-blink .5s step-end infinite;
+    }
+    @keyframes rai-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+
+    /* Trace collapsible - sits below bubble, inside row */
+    .rai-trace { margin-top: 6px; padding-left: 4px; }
+    .rai-trace summary {
+      cursor: pointer; font-size: 11px; font-weight: 500;
+      color: #94a3b8; padding: 4px 0; user-select: none;
+      list-style: none;
+    }
+    .rai-trace summary:hover { color: #64748b; }
+    .rai-trace summary::before { content: '\\25B6\\FE0E '; font-size: 9px; transition: transform .15s; display: inline-block; }
+    .rai-trace[open] summary::before { transform: rotate(90deg); }
+    .rai-trace-step {
+      padding: 3px 0 3px 12px; border-left: 2px solid #e2e8f0;
+      margin: 3px 0; font-size: 11px; color: #64748b; line-height: 1.45;
+    }
+    .rai-trace-step .ct { color: #0284c7; font-weight: 600; }
+    .rai-trace-cfg {
+      margin-top: 8px; padding: 8px 10px; background: #f8fafc;
+      border-radius: 8px; font-size: 11px; color: #475569; line-height: 1.5;
+    }
+
+    /* Input area */
+    #rai-input-area {
+      padding: 12px 16px; border-top: none;
+      display: flex; align-items: flex-end; gap: 8px;
+      flex-shrink: 0; background: #fff;
+    }
+    #rai-input-wrap {
+      flex: 1; display: flex; align-items: center;
+      border: 1px solid #e2e8f0; border-radius: 24px;
+      padding: 2px 4px 2px 16px;
+      transition: box-shadow .15s;
+      background: #fff;
+      box-shadow: 0 1px 3px rgba(0,0,0,.06), 0 4px 10px rgba(0,0,0,.04);
+    }
+    #rai-input-wrap:focus-within {
+      border-color: #e2e8f0;
+      box-shadow: 0 1px 3px rgba(0,0,0,.08), 0 4px 12px rgba(0,0,0,.06);
+    }
+    #rai-input {
+      flex: 1; border: none; outline: none; background: transparent;
+      font-size: 13.5px; line-height: 1.4; padding: 10px 0;
+      font-family: inherit; color: #1e293b; resize: none;
+      field-sizing: content; max-height: 120px; overflow-y: auto;
+      -webkit-appearance: none; appearance: none;
+    }
+    #rai-input:focus { outline: none; border: none; box-shadow: none; }
+    #rai-input::placeholder { color: #94a3b8; }
+    #rai-input:disabled { color: #94a3b8; }
+    #rai-send {
+      width: 32px; height: 32px; border-radius: 50%; border: none;
+      background: ${BRAND}; color: #000; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0; transition: background .15s, opacity .15s;
+      margin: 4px 0;
+    }
+    #rai-send:hover { background: ${BRAND_DARK}; }
+    #rai-send:disabled { background: ${BRAND_LIGHT}; cursor: not-allowed; opacity: .5; }
+    #rai-send svg { width: 14px; height: 14px; fill: currentColor; stroke: none; }
+
+    /* Mobile */
+    @media (max-width: 480px) {
+      #rai-panel { width: calc(100vw - 16px); right: 8px; bottom: 80px; height: 70vh; }
+      #rai-fab { bottom: 16px; right: 16px; }
+    }
+  `;
+
+  // --- SVG icons --------------------------------------------------------
+  const ICON_CHAT = `<svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>`;
+  const ICON_CLOSE = `<svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>`;
+  const ICON_SEND = `<svg viewBox="0 0 24 24"><path d="M11 19V7.41l-4.29 4.3a1 1 0 0 1-1.42-1.42l6-6a1 1 0 0 1 1.42 0l6 6a1 1 0 0 1-1.42 1.42L13 7.41V19a1 1 0 0 1-2 0z"/></svg>`;
+
+  // --- DOM construction -------------------------------------------------
+  function buildWidget() {
+    const existing = document.getElementById("rai");
+    if (existing) existing.remove();
+
+    const el = document.createElement("div");
+    el.id = "rai";
+    el.innerHTML = `
+      <style>${STYLES}</style>
+      <button id="rai-fab" title="Roam AI">${ICON_CHAT}</button>
+      <div id="rai-panel" class="hidden">
+        <div id="rai-hdr">
+          <div id="rai-hdr-left">
+            <div id="rai-hdr-icon">AI</div>
+            <div>
+              <h3>Roam AI</h3>
+              <div id="rai-tenant">Detecting site...</div>
+            </div>
+          </div>
+          <button id="rai-close">${ICON_CLOSE}</button>
+        </div>
+        <div id="rai-msgs"></div>
+        <div id="rai-input-area">
+          <div id="rai-input-wrap">
+            <textarea id="rai-input" rows="1" placeholder="Ask about this page..." disabled></textarea>
+            <button id="rai-send" disabled>${ICON_SEND}</button>
+          </div>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(el);
+
+    document.getElementById("rai-fab").addEventListener("click", toggle);
+    document.getElementById("rai-close").addEventListener("click", toggle);
+    document.getElementById("rai-send").addEventListener("click", send);
+    document.getElementById("rai-input").addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+    });
+  }
+
+  // --- Toggle -----------------------------------------------------------
+  function toggle() {
+    isOpen = !isOpen;
+    document.getElementById("rai-panel").classList.toggle("hidden", !isOpen);
+    if (isOpen && !tenant) resolveTenant();
+    if (isOpen) document.getElementById("rai-input").focus();
+  }
+
+  // --- Tenant resolution ------------------------------------------------
+  async function resolveTenant() {
+    const tenantEl = document.getElementById("rai-tenant");
+    const input = document.getElementById("rai-input");
+    const sendBtn = document.getElementById("rai-send");
+
+    tenantEl.textContent = `Looking up ${HOSTNAME}...`;
+
+    try {
+      const res = await fetch(`${API_BASE}/api/resolve-tenant`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hostname: HOSTNAME }),
+      });
+      const data = await res.json();
+
+      if (data.tenant) {
+        tenant = data.tenant;
+        tenantEl.textContent = `${tenant} - ${PAGE_URI}`;
+        input.disabled = false;
+        sendBtn.disabled = false;
+        addMessage("system", `Connected to ${tenant}. Ask me why this page shows certain listings.`);
+      } else {
+        tenantEl.textContent = `Unknown site: ${HOSTNAME}`;
+        addMessage("error", `Could not resolve "${HOSTNAME}" to a Roam tenant. Default tenant will be used.`);
+        input.disabled = false;
+        sendBtn.disabled = false;
+      }
+    } catch (err) {
+      tenantEl.textContent = "Connection error";
+      addMessage("error", `Failed to connect: ${err.message}`);
+      input.disabled = false;
+      sendBtn.disabled = false;
+    }
+
+    input.focus();
+  }
+
+  // --- Minimal markdown -> HTML -----------------------------------------
+  function md(text) {
+    if (!text) return "";
+    return text
+      // Escape HTML entities
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      // Bold
+      .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+      // Inline code
+      .replace(/`(.+?)`/g, "<code>$1</code>")
+      // Paragraphs (double newline)
+      .replace(/\n\n+/g, "</p><p>")
+      // Single newline -> <br>
+      .replace(/\n/g, "<br>")
+      // Wrap in <p>
+      .replace(/^(.+)$/, "<p>$1</p>");
+  }
+
+  // --- Message helpers --------------------------------------------------
+  function addMessage(type, text) {
+    const msgs = document.getElementById("rai-msgs");
+    const row = document.createElement("div");
+    row.className = `rai-row ${type}`;
+
+    const bubble = document.createElement("div");
+    bubble.className = "rai-bubble";
+    if (type === "user") {
+      bubble.textContent = text;
+    } else {
+      bubble.innerHTML = text ? md(text) : "";
+    }
+
+    row.appendChild(bubble);
+    msgs.appendChild(row);
+    msgs.scrollTop = msgs.scrollHeight;
+    return { row, bubble };
+  }
+
+  function renderTrace(trace, config) {
+    if (!trace || trace.length === 0) return "";
+
+    const steps = trace.map((s) => {
+      const ct = s.count > 0 ? `<span class="ct">${s.count}</span>` : "0";
+      const icon = s.targetPresent === true ? " &#10003;" : s.targetPresent === false ? " &#10007;" : "";
+      return `<div class="rai-trace-step">${s.description} (${ct})${icon}</div>`;
+    }).join("");
+
+    let cfgHtml = "";
+    if (config) {
+      const parts = [];
+      if (config.categories?.length) parts.push(`<b>Categories:</b> ${config.categories.map((c) => c.title).join(", ")}`);
+      if (config.regions?.length) parts.push(`<b>Regions:</b> ${config.regions.map((r) => r.title).join(", ")}`);
+      if (config.tiers?.length) parts.push(`<b>Tiers:</b> ${config.tiers.map((t) => t.title).join(", ")}`);
+      if (config.limit) parts.push(`<b>Limit:</b> ${config.limit}`);
+      if (config.order) parts.push(`<b>Order:</b> ${config.order}`);
+      if (parts.length) cfgHtml = `<div class="rai-trace-cfg">${parts.join("<br>")}</div>`;
+    }
+
+    return `<details class="rai-trace"><summary>Trace - ${trace.length} steps</summary>${steps}${cfgHtml}</details>`;
+  }
+
+  // --- Send question ----------------------------------------------------
+  async function send() {
+    const input = document.getElementById("rai-input");
+    const sendBtn = document.getElementById("rai-send");
+    const question = input.value.trim();
+    if (!question || isLoading) return;
+
+    isLoading = true;
+    input.value = "";
+    input.disabled = true;
+    sendBtn.disabled = true;
+
+    addMessage("user", question);
+
+    const { row, bubble } = addMessage("ai", "");
+    row.classList.add("rai-typing");
+
+    const payload = { question, pageUri: PAGE_URI };
+    if (tenant) payload.tenant = tenant;
+    else payload.hostname = HOSTNAME;
+
+    try {
+      const res = await fetch(`${API_BASE}/api/explain/stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: res.statusText }));
+        throw new Error(err.error || err.detail || `HTTP ${res.status}`);
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let fullText = "";
+      let metadata = null;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop();
+
+        for (const line of lines) {
+          if (line.startsWith("event:")) continue;
+          if (!line.startsWith("data: ")) continue;
+          const data = line.slice(6);
+          if (data === "[DONE]") continue;
+
+          try {
+            const parsed = JSON.parse(data);
+            if (parsed.event === "metadata") { metadata = parsed; continue; }
+            if (parsed.response) {
+              fullText += parsed.response;
+              // During streaming, use plain text for performance
+              bubble.textContent = fullText;
+              document.getElementById("rai-msgs").scrollTop = document.getElementById("rai-msgs").scrollHeight;
+            }
+          } catch { /* partial SSE chunk */ }
+        }
+      }
+
+      row.classList.remove("rai-typing");
+
+      // Final render: convert to formatted HTML
+      if (fullText) {
+        bubble.innerHTML = md(fullText);
+      } else {
+        bubble.innerHTML = "<p>No explanation generated. Check the trace below.</p>";
+      }
+
+      // Trace goes below the bubble, inside the row
+      if (metadata) {
+        const traceHtml = renderTrace(metadata.trace, metadata.config);
+        if (traceHtml) {
+          const traceEl = document.createElement("div");
+          traceEl.innerHTML = traceHtml;
+          row.appendChild(traceEl);
+        }
+        if (metadata.debug?.timing) console.log("[Roam AI] Timing:", metadata.debug.timing);
+      }
+
+    } catch (err) {
+      row.classList.remove("rai-typing");
+      row.className = "rai-row error";
+      bubble.textContent = `Error: ${err.message}`;
+    } finally {
+      isLoading = false;
+      input.disabled = false;
+      sendBtn.disabled = false;
+      input.focus();
+    }
+  }
+
+  // --- Boot -------------------------------------------------------------
+  buildWidget();
+  console.log(
+    "%c[Roam AI]%c Widget loaded. Click the chat button to start.",
+    "color:#3b82f6;font-weight:bold", "color:inherit"
+  );
+})();

@@ -1,0 +1,82 @@
+name: Push Theme Knowledge Base
+
+# Reusable workflow - called from each theme repo's deployment.yml
+# Converts component templates to Markdown and pushes to R2 for AI Search indexing.
+#
+# AI Search doesn't support .twig files directly, so we wrap each source file
+# in a Markdown code block with metadata (file path, theme, component type).
+#
+# Usage in theme repo:
+#   jobs:
+#     push-knowledge:
+#       uses: roamhq/roam-saas-ai/.github/workflows/push-knowledge.yml@main
+#       with:
+#         theme: vicheartland
+#       secrets: inherit
+
+on:
+  workflow_call:
+    inputs:
+      theme:
+        description: "Theme handle (e.g. vicheartland, beg, swanvalley)"
+        required: true
+        type: string
+
+env:
+  R2_ENDPOINT: "https://732e7b6d5dd17779e5b2368491e6a05f.r2.cloudflarestorage.com"
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout theme repo
+        uses: actions/checkout@v4
+
+      - name: Convert templates to Markdown
+        run: |
+          OUTDIR="${GITHUB_WORKSPACE}/_knowledge-base"
+          mkdir -p "$OUTDIR"
+          THEME="${{ inputs.theme }}"
+
+          find app/templates/components -type f \( -name "*.twig" -o -name "*.js" \) | while read src; do
+            component=$(echo "$src" | sed 's|app/templates/components/||' | cut -d/ -f1)
+            filename=$(basename "$src")
+            ext="${filename##*.}"
+
+            rel_path=$(echo "$src" | sed 's|app/templates/components/||')
+            out_dir="${OUTDIR}/themes/${THEME}/components/$(dirname "$rel_path")"
+            out_file="${out_dir}/${filename}.md"
+            mkdir -p "$out_dir"
+
+            {
+              echo "# ${component} Component - ${filename}"
+              echo ""
+              echo "**Theme**: ${THEME}"
+              echo "**Component**: ${component}"
+              echo "**File**: ${src}"
+              echo "**Type**: ${ext}"
+              echo ""
+              echo '```'"${ext}"
+              cat "$src"
+              echo '```'
+            } > "$out_file"
+
+            echo "  Converted: $src"
+          done
+
+          echo "Total files: $(find "$OUTDIR" -name '*.md' | wc -l)"
+
+      - name: Push to R2
+        uses: andreiio/rclone-action@v1
+        with:
+          args: >-
+            copy _knowledge-base/
+            s3:roam-ai/
+        env:
+          RCLONE_CONFIG_S3_TYPE: s3
+          RCLONE_CONFIG_S3_PROVIDER: Cloudflare
+          RCLONE_CONFIG_S3_ACCESS_KEY_ID: ${{ secrets.ACCESS_KEY_ID }}
+          RCLONE_CONFIG_S3_SECRET_ACCESS_KEY: ${{ secrets.SECRET_ACCESS_KEY }}
+          RCLONE_CONFIG_S3_ENDPOINT: ${{ env.R2_ENDPOINT }}
+          RCLONE_CONFIG_S3_ACL: private

@@ -1,0 +1,93 @@
+name = "roam-saas-ai-dev"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+rules = [{ type = "Text", globs = ["**/*.txt"], fallthrough = false }]
+
+[ai]
+binding = "AI"
+
+[[r2_buckets]]
+binding = "KNOWLEDGE_BASE"
+bucket_name = "roam-ai"
+
+[[kv_namespaces]]
+binding = "CACHE"
+id = "dafe6abd67d5400e9aa9357579faa780"
+
+# Shared with roam-saas-customer: maps origin:{hostname} -> {tenant}.roamhq.io
+[[kv_namespaces]]
+binding = "ORIGINS"
+id = "9c6b1bd59e4e413da7aab590ee15eed9"
+
+# Hyperdrive - Craft CMS MySQL (read-only)
+# Create with: wrangler hyperdrive create roam-craft-db --connection-string="mysql://readonly_user:password@host:3306/craft_db"
+[[hyperdrive]]
+binding = "DB"
+id = "a7e8d114c7764404addb8360c634abc8"
+
+[vars]
+DEFAULT_TENANT = "vicheartland"
+AUTORAG_NAME = "roam-ai"  # Update to match your AI Search instance name in the dashboard
+
+# -------------------------------------------------------------------
+# Staging
+# -------------------------------------------------------------------
+[env.staging]
+name = "roam-saas-ai-staging"
+vars = { ENVIRONMENT = "staging", DEFAULT_TENANT = "vicheartland", AUTORAG_NAME = "roam-ai" }
+
+[env.staging.ai]
+binding = "AI"
+
+[[env.staging.r2_buckets]]
+binding = "KNOWLEDGE_BASE"
+bucket_name = "roam-ai"
+
+[[env.staging.kv_namespaces]]
+binding = "CACHE"
+id = "dafe6abd67d5400e9aa9357579faa780"
+
+[[env.staging.kv_namespaces]]
+binding = "ORIGINS"
+id = "9c6b1bd59e4e413da7aab590ee15eed9"
+
+[[env.staging.hyperdrive]]
+binding = "DB"
+id = "a7e8d114c7764404addb8360c634abc8"
+
+[env.staging.placement]
+region = "aws:ap-southeast-2"
+
+# -------------------------------------------------------------------
+# Production
+# -------------------------------------------------------------------
+[env.production]
+name = "roam-saas-ai"
+minify = true
+vars = { ENVIRONMENT = "production", DEFAULT_TENANT = "vicheartland", AUTORAG_NAME = "roam-ai" }
+
+[env.production.ai]
+binding = "AI"
+
+[[env.production.r2_buckets]]
+binding = "KNOWLEDGE_BASE"
+bucket_name = "roam-ai"
+
+[[env.production.kv_namespaces]]
+binding = "CACHE"
+id = "dafe6abd67d5400e9aa9357579faa780"
+
+[[env.production.kv_namespaces]]
+binding = "ORIGINS"
+id = "9c6b1bd59e4e413da7aab590ee15eed9"
+
+[[env.production.hyperdrive]]
+binding = "DB"
+id = "a7e8d114c7764404addb8360c634abc8"
+
+[env.production.placement]
+region = "aws:ap-southeast-2"
+
+[placement]
+region = "aws:ap-southeast-2"

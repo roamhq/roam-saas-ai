@@ -1,0 +1,30 @@
+{
+  "name": "roam-saas-ai",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Explainability bot for Roam CMS - answers 'why does my page show this?'",
+  "homepage": "https://github.com/roamhq/roam-saas-ai#readme",
+  "license": "MIT OR Apache-2.0",
+  "author": "devops@roamhq.io",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "deploy:staging": "wrangler deploy --env staging",
+    "deploy:production": "wrangler deploy --env production",
+    "types": "wrangler types",
+    "kb:build": "node scripts/build-knowledge-base.js",
+    "kb:upload": "node scripts/upload-knowledge-base.js"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241218.0",
+    "typescript": "^5.7.0",
+    "wrangler": "^4.22.0"
+  },
+  "dependencies": {
+    "mysql2": "^3.11.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
