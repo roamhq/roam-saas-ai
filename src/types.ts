@@ -17,12 +17,19 @@ export interface Env {
 // Request / Response
 // ---------------------------------------------------------------------------
 
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
 export interface ExplainRequest {
   question: string;
   tenant?: string;
   hostname?: string; // customer domain - resolved to tenant via ORIGINS KV
   pageUri?: string;
   componentIndex?: number;
+  /** Prior conversation turns for multi-turn context */
+  history?: ChatMessage[];
 }
 
 export interface ExplainResponse {

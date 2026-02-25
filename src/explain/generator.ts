@@ -1,5 +1,6 @@
 import type {
   Env,
+  ChatMessage,
   ParsedIntent,
   DomainConfig,
   ComponentConfig,
@@ -23,17 +24,16 @@ export async function generateExplanation(
   config: DomainConfig | null,
   trace: TraceStep[],
   targetProductIds: number[],
-  codeContext: string = ""
+  codeContext: string = "",
+  history: ChatMessage[] = []
 ): Promise<string> {
   const systemPrompt = buildSystemPrompt(intent.domain);
   const userPrompt = buildUserPrompt(question, intent, config, trace, targetProductIds, codeContext);
+  const messages = buildMessages(systemPrompt, userPrompt, history);
 
   try {
     const result = await env.AI.run(TEXT_MODEL, {
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
+      messages,
       max_tokens: 512,
       temperature: 0.3,
     });
@@ -63,10 +63,12 @@ export function streamExplanation(
   config: DomainConfig | null,
   trace: TraceStep[],
   targetProductIds: number[],
-  codeContext: string = ""
+  codeContext: string = "",
+  history: ChatMessage[] = []
 ): ReadableStream {
   const systemPrompt = buildSystemPrompt(intent.domain);
   const userPrompt = buildUserPrompt(question, intent, config, trace, targetProductIds, codeContext);
+  const messages = buildMessages(systemPrompt, userPrompt, history);
 
   const encoder = new TextEncoder();
 
@@ -74,10 +76,7 @@ export function streamExplanation(
     async start(controller) {
       try {
         const stream = await env.AI.run(TEXT_MODEL, {
-          messages: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: userPrompt },
-          ],
+          messages,
           max_tokens: 512,
           temperature: 0.3,
           stream: true,
@@ -104,6 +103,53 @@ export function streamExplanation(
       }
     },
   });
+}
+
+// ---------------------------------------------------------------------------
+// Message construction (internal)
+// ---------------------------------------------------------------------------
+
+type AiMessage = { role: "system" | "user" | "assistant"; content: string };
+
+/**
+ * Build the full messages array for the LLM, including conversation history.
+ *
+ * Structure:
+ *   [system] system prompt (always first)
+ *   [user]   prior turn 1 (from history)
+ *   [asst]   prior turn 1 response (from history)
+ *   ...
+ *   [user]   current question + diagnostic data (always last)
+ *
+ * History is trimmed to keep total content under ~3000 chars to avoid
+ * blowing the 8B model's effective attention budget.
+ */
+function buildMessages(
+  systemPrompt: string,
+  userPrompt: string,
+  history: ChatMessage[]
+): AiMessage[] {
+  const messages: AiMessage[] = [{ role: "system", content: systemPrompt }];
+
+  if (history.length > 0) {
+    // Trim history to fit - keep recent turns, truncate long messages
+    let historyBudget = 3000;
+    const trimmed: AiMessage[] = [];
+
+    for (const msg of history) {
+      const content = msg.content.length > 500
+        ? msg.content.slice(0, 500) + "..."
+        : msg.content;
+      historyBudget -= content.length;
+      if (historyBudget < 0) break;
+      trimmed.push({ role: msg.role, content });
+    }
+
+    messages.push(...trimmed);
+  }
+
+  messages.push({ role: "user", content: userPrompt });
+  return messages;
 }
 
 // ---------------------------------------------------------------------------

@@ -28,6 +28,8 @@
   let tenant = null;
   let isOpen = false;
   let isLoading = false;
+  /** @type {{ role: "user"|"assistant", content: string }[]} */
+  let chatHistory = [];
 
   // --- Styles -----------------------------------------------------------
   const STYLES = `
@@ -379,6 +381,7 @@
     sendBtn.disabled = true;
 
     addMessage("user", question);
+    chatHistory.push({ role: "user", content: question });
 
     const { row, bubble } = addMessage("ai", "");
     row.classList.add("rai-typing");
@@ -386,6 +389,7 @@
     const payload = { question, pageUri: PAGE_URI };
     if (tenant) payload.tenant = tenant;
     else payload.hostname = HOSTNAME;
+    if (chatHistory.length > 1) payload.history = chatHistory.slice(0, -1); // prior turns (exclude current question)
 
     try {
       const res = await fetch(`${API_BASE}/api/explain/stream`, {
@@ -437,6 +441,7 @@
       // Final render: convert to formatted HTML
       if (fullText) {
         bubble.innerHTML = md(fullText);
+        chatHistory.push({ role: "assistant", content: fullText });
       } else {
         bubble.innerHTML = "<p>No explanation generated. Check the trace below.</p>";
       }

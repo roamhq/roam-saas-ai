@@ -2,6 +2,7 @@ import type {
   Env,
   ExplainRequest,
   ExplainResponse,
+  ChatMessage,
   ParsedIntent,
   DomainConfig,
   ComponentConfig,
@@ -122,12 +123,21 @@ function validateExplainRequest(body: unknown): ExplainRequest {
   if (typeof b.question !== "string" || b.question.trim().length === 0) {
     throw new RequestError("'question' is required and must be a non-empty string", 400);
   }
+  // Validate history if present: array of {role, content} objects, capped at 20 turns
+  const history = Array.isArray(b.history)
+    ? (b.history as { role?: unknown; content?: unknown }[])
+        .filter((m) => (m.role === "user" || m.role === "assistant") && typeof m.content === "string")
+        .slice(-20) // keep only the most recent 20 turns
+        .map((m) => ({ role: m.role as "user" | "assistant", content: String(m.content) }))
+    : undefined;
+
   return {
     question: b.question,
     tenant: typeof b.tenant === "string" ? b.tenant : undefined,
     hostname: typeof b.hostname === "string" ? b.hostname : undefined,
     pageUri: typeof b.pageUri === "string" ? b.pageUri : undefined,
     componentIndex: typeof b.componentIndex === "number" ? b.componentIndex : undefined,
+    history: history && history.length > 0 ? history : undefined,
   };
 }
 
@@ -171,6 +181,7 @@ interface ResolvedData {
   trace: TraceStep[];
   targetProductIds: number[];
   codeContext: string;
+  history: ChatMessage[];
   timing: Record<string, number>;
 }
 
@@ -183,6 +194,7 @@ async function resolveData(
 
   const raw = await parseRequestBody<unknown>(request);
   const body = validateExplainRequest(raw);
+  const history = body.history ?? [];
 
   // Resolve tenant: explicit tenant > hostname lookup > default
   let tenant = body.tenant;
@@ -224,6 +236,7 @@ async function resolveData(
         trace: atdwResult.trace,
         targetProductIds: [],
         codeContext,
+        history,
         timing,
       };
     }
@@ -238,7 +251,7 @@ async function resolveData(
     if (!pageUri) {
       const codeContext = await codeContextPromise;
       return {
-        intent, config: null, trace: [], targetProductIds: [], codeContext, timing,
+        intent, config: null, trace: [], targetProductIds: [], codeContext, history, timing,
       };
     }
 
@@ -270,6 +283,7 @@ async function resolveData(
         }],
         targetProductIds: [],
         codeContext,
+        history,
         timing,
       };
     }
@@ -316,6 +330,7 @@ async function resolveData(
       trace: traceResult.trace,
       targetProductIds,
       codeContext,
+      history,
       timing,
     };
   } finally {
@@ -343,7 +358,8 @@ async function handleExplain(
       data.config,
       data.trace,
       data.targetProductIds,
-      data.codeContext
+      data.codeContext,
+      data.history
     );
     data.timing.generation = Date.now() - t0;
 
@@ -418,7 +434,8 @@ async function handleExplainStream(
             data.config,
             data.trace,
             data.targetProductIds,
-            data.codeContext
+            data.codeContext,
+            data.history
           );
 
           const reader = stream.getReader();
