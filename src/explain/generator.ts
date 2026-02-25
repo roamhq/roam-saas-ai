@@ -1,7 +1,9 @@
 import type {
   Env,
   ParsedIntent,
+  DomainConfig,
   ComponentConfig,
+  AtdwImportConfig,
   TraceStep,
   TraceStepName,
 } from "../types";
@@ -18,11 +20,11 @@ export async function generateExplanation(
   env: Env,
   question: string,
   intent: ParsedIntent,
-  config: ComponentConfig | null,
+  config: DomainConfig | null,
   trace: TraceStep[],
   targetProductIds: number[]
 ): Promise<string> {
-  const systemPrompt = buildSystemPrompt();
+  const systemPrompt = buildSystemPrompt(intent.domain);
   const userPrompt = buildUserPrompt(question, intent, config, trace, targetProductIds);
 
   try {
@@ -57,11 +59,11 @@ export function streamExplanation(
   env: Env,
   question: string,
   intent: ParsedIntent,
-  config: ComponentConfig | null,
+  config: DomainConfig | null,
   trace: TraceStep[],
   targetProductIds: number[]
 ): ReadableStream {
-  const systemPrompt = buildSystemPrompt();
+  const systemPrompt = buildSystemPrompt(intent.domain);
   const userPrompt = buildUserPrompt(question, intent, config, trace, targetProductIds);
 
   const encoder = new TextEncoder();
@@ -106,7 +108,25 @@ export function streamExplanation(
 // Prompt construction (internal)
 // ---------------------------------------------------------------------------
 
-function buildSystemPrompt(): string {
+function buildSystemPrompt(domain: string = "page_component"): string {
+  if (domain === "atdw_import") {
+    return `You are a friendly, knowledgeable support person helping tourism website managers understand how ATDW (Australian Tourism Data Warehouse) products are imported into their website.
+
+The user manages a tourism website on the Roam platform. Products from the ATDW Atlas system are automatically imported based on configured categories, regions, and postcodes. The import process checks each product against the site's settings to decide whether to import it.
+
+You have been given diagnostic data about a specific product's import journey. Use this data to answer their question accurately - but explain it in everyday language as if you were a colleague walking them through it.
+
+Writing style:
+- Talk about "the import process" or "how the sync works", never "the reason column" or "createRecord"
+- Use the actual product name, organisation name, and location - never raw IDs
+- Explain the WHY naturally: "Because the product's postcode 3500 (Mildura) isn't in any of your enabled regions..."
+- If a product wasn't imported, explain which specific check prevented it
+- If a product is inactive or expired, explain what that means in practical terms
+- Mention the ATDW category (accommodation, event, attraction, etc.) in plain terms
+- Keep it to 2-3 short paragraphs. Be warm but concise - respect their time
+- Never reference internal step names, database tables, or technical jargon`;
+  }
+
   return `You are a friendly, knowledgeable support person helping tourism website managers understand why their pages display certain listings.
 
 The user manages a tourism website on the Roam platform. Pages have components like "Products" that display tourism businesses, experiences, and deals. These components have settings (categories, regions, tiers) that control what gets shown.
@@ -127,12 +147,28 @@ Writing style:
 function buildUserPrompt(
   question: string,
   intent: ParsedIntent,
-  config: ComponentConfig | null,
+  config: DomainConfig | null,
   trace: TraceStep[],
   targetProductIds: number[]
 ): string {
-  const configSummary = config ? formatConfig(config) : "No configuration data available for this component.";
   const traceSummary = formatTrace(trace);
+
+  if (intent.domain === "atdw_import" && config && "domain" in config && config.domain === "atdw_import") {
+    const atdwConfig = config as AtdwImportConfig;
+    let prompt = `The client asked: "${question}"\n\n`;
+    prompt += `ATDW Product: ${atdwConfig.productName}\n`;
+    prompt += `Organisation: ${atdwConfig.organisation ?? "unknown"}\n`;
+    prompt += `Category: ${atdwConfig.category}\n`;
+    prompt += `ATDW Status: ${atdwConfig.atdwStatus}\n`;
+    prompt += `Location: ${atdwConfig.city ?? "unknown"} (postcode: ${atdwConfig.postcode ?? "unknown"})\n`;
+    prompt += `Imported: ${atdwConfig.imported ? "Yes" : "No"}\n`;
+    prompt += `Has website entry: ${atdwConfig.hasEntry ? "Yes" : "No"}\n`;
+    prompt += `\nHere's what the import process found:\n${traceSummary}\n`;
+    prompt += `\nExplain this to the client in plain, friendly language.`;
+    return prompt;
+  }
+
+  const configSummary = config ? formatConfig(config as ComponentConfig) : "No configuration data available for this component.";
 
   let prompt = `The client asked: "${question}"\n\n`;
   prompt += `Page: ${intent.pageUri ?? "unknown"}\n`;
@@ -199,6 +235,7 @@ function formatConfig(config: ComponentConfig): string {
 
 /** Map internal step names to human-readable descriptions */
 const stepLabels: Record<TraceStepName, string> = {
+  // Page-builder steps
   resolve_categories: "Category settings",
   resolve_regions: "Region settings",
   region_to_products: "Finding listings in those regions",
@@ -209,6 +246,16 @@ const stepLabels: Record<TraceStepName, string> = {
   sort: "Sorting",
   limit: "Display limit",
   block_config: "Component configuration",
+  // ATDW import steps - mirrors ProductService::createRecord() + ImportService
+  atdw_lookup: "ATDW product lookup",
+  atdw_region_config: "Configured import regions",
+  atdw_postcode_match: "Postcode matching",
+  atdw_status_eval: "ATDW status evaluation",
+  atdw_fetch_eligibility: "Fetch eligibility",
+  atdw_data_delta: "Data change detection",
+  atdw_import_resolution: "Import decision",
+  atdw_entry_state: "Product entry processing",
+  atdw_entry_link: "Website listing",
 };
 
 function formatTrace(trace: TraceStep[]): string {
@@ -249,26 +296,49 @@ function formatTrace(trace: TraceStep[]): string {
  */
 function generateFallbackExplanation(
   intent: ParsedIntent,
-  config: ComponentConfig | null,
+  config: DomainConfig | null,
   trace: TraceStep[],
   targetProductIds: number[]
 ): string {
   const lines: string[] = [];
 
+  // ATDW domain fallback
+  if (intent.domain === "atdw_import" && config && "domain" in config && config.domain === "atdw_import") {
+    const atdwConfig = config as AtdwImportConfig;
+    lines.push(`Here's what I found about the ATDW import for "${atdwConfig.productName}":\n`);
+    lines.push(`Organisation: ${atdwConfig.organisation ?? "unknown"}`);
+    lines.push(`Category: ${atdwConfig.category}`);
+    lines.push(`ATDW Status: ${atdwConfig.atdwStatus}`);
+    lines.push(`Location: ${atdwConfig.city ?? "unknown"} (${atdwConfig.postcode ?? "no postcode"})`);
+    lines.push(`Imported: ${atdwConfig.imported ? "Yes" : "No"}`);
+    lines.push(`Has website entry: ${atdwConfig.hasEntry ? "Yes" : "No"}`);
+
+    if (trace.length > 0) {
+      lines.push("\nImport trace:");
+      for (const step of trace) {
+        const label = stepLabels[step.step] ?? step.step;
+        lines.push(`- ${label}: ${step.description}`);
+      }
+    }
+
+    return lines.join("\n");
+  }
+
   lines.push(
     `Here's what I found about the Products component on ${intent.pageUri ?? "this page"}:\n`
   );
 
-  if (config) {
+  if (config && !("domain" in config)) {
+    const compConfig = config as ComponentConfig;
     const filters: string[] = [];
-    if (config.categories.length > 0)
-      filters.push(`categories: ${config.categories.map((c) => c.title).join(", ")}`);
-    if (config.regions.length > 0)
-      filters.push(`regions: ${config.regions.map((r) => r.title).join(", ")}`);
-    if (config.tiers.length > 0)
-      filters.push(`tiers: ${config.tiers.map((t) => t.title).join(", ")}`);
-    if (config.taxonomy.length > 0)
-      filters.push(`taxonomy: ${config.taxonomy.map((t) => t.title).join(", ")}`);
+    if (compConfig.categories.length > 0)
+      filters.push(`categories: ${compConfig.categories.map((c: { title: string }) => c.title).join(", ")}`);
+    if (compConfig.regions.length > 0)
+      filters.push(`regions: ${compConfig.regions.map((r: { title: string }) => r.title).join(", ")}`);
+    if (compConfig.tiers.length > 0)
+      filters.push(`tiers: ${compConfig.tiers.map((t: { title: string }) => t.title).join(", ")}`);
+    if (compConfig.taxonomy.length > 0)
+      filters.push(`taxonomy: ${compConfig.taxonomy.map((t: { title: string }) => t.title).join(", ")}`);
 
     if (filters.length > 0) {
       lines.push(`The component is configured to filter by ${filters.join(" and ")}.`);
@@ -276,9 +346,9 @@ function generateFallbackExplanation(
       lines.push("The component has no category, region, or tier filters.");
     }
 
-    if (config.explicitProducts.length > 0) {
+    if (compConfig.explicitProducts.length > 0) {
       lines.push(
-        `${config.explicitProducts.length} products were explicitly selected.`
+        `${compConfig.explicitProducts.length} products were explicitly selected.`
       );
     }
   }
@@ -286,9 +356,10 @@ function generateFallbackExplanation(
   // Final results
   if (trace.length > 0) {
     const finalStep = trace[trace.length - 1];
+    const compConfig = config && !("domain" in config) ? config as ComponentConfig : null;
     lines.push(
       `\nAfter all filters, ${finalStep.count} products are displayed` +
-        (config ? ` (limit: ${config.limit}, order: ${config.order}).` : ".")
+        (compConfig ? ` (limit: ${compConfig.limit}, order: ${compConfig.order}).` : ".")
     );
 
     // Target product status

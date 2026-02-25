@@ -55,9 +55,10 @@ export function createConnection(env: Env, tenant?: string): DatabaseConnection 
       params?: unknown[]
     ): Promise<T[]> {
       const c = await getConnection();
-      // Prefix all craft_ table references with the tenant database name
+      // Prefix all craft_ and roam_ table references with the tenant database name
       // e.g. craft_elements -> vicheartland.craft_elements
-      const prefixedSql = sql.replace(/\bcraft_/g, `${dbPrefix}.craft_`);
+      //      roam_atdw_products -> vicheartland.roam_atdw_products
+      const prefixedSql = sql.replace(/\b(craft_|roam_)/g, `${dbPrefix}.$1`);
       const [rows] = await c.query(prefixedSql, params ?? []);
       return rows as T[];
     },

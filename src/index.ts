@@ -3,6 +3,7 @@ import type {
   ExplainRequest,
   ExplainResponse,
   ParsedIntent,
+  DomainConfig,
   ComponentConfig,
   TraceStep,
 } from "./types";
@@ -12,6 +13,7 @@ import { getSchemaCache } from "./db/bootstrap";
 import { resolvePageBlocks } from "./db/queries/page-builder";
 import { resolveProductsByName } from "./db/queries/products";
 import { traceBlock } from "./db/filter-chains/dispatch";
+import { traceAtdwImport } from "./db/filter-chains/atdw";
 import {
   generateExplanation,
   streamExplanation,
@@ -164,7 +166,7 @@ async function resolveTenantFromHostname(
 
 interface ResolvedData {
   intent: ParsedIntent;
-  config: ComponentConfig | null;
+  config: DomainConfig | null;
   trace: TraceStep[];
   targetProductIds: number[];
   timing: Record<string, number>;
@@ -201,6 +203,26 @@ async function resolveData(
   try {
     const schema = await getSchemaCache(db, env.CACHE, tenant);
 
+    // -----------------------------------------------------------------------
+    // ATDW import domain - separate from page-builder path
+    // -----------------------------------------------------------------------
+    if (intent.domain === "atdw_import") {
+      t0 = Date.now();
+      const atdwResult = await traceAtdwImport(db, schema, intent);
+      timing.filterChain = Date.now() - t0;
+
+      return {
+        intent,
+        config: atdwResult.config,
+        trace: atdwResult.trace,
+        targetProductIds: [],
+        timing,
+      };
+    }
+
+    // -----------------------------------------------------------------------
+    // Page-builder domain (existing path)
+    // -----------------------------------------------------------------------
     const pageUri = intent.pageUri ?? body.pageUri;
     if (!pageUri) {
       return {
