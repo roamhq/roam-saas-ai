@@ -36,9 +36,11 @@ export async function parseIntent(
 
 The website is a tourism destination marketing site built on Craft CMS. There are two domains:
 
-1. "page_component" - Questions about page builder components (Products, Hero, Featured, Text, Images). Why certain listings show on a page, ordering, filtering.
+1. "page_component" - Questions about page builder components (Products, Hero, Featured, Text, Images). Why certain listings show on a page, ordering, filtering. The page URL will be a public-facing path like "/things-to-do" or "/accommodation".
 
-2. "atdw_import" - Questions about ATDW (Australian Tourism Data Warehouse) product imports. Why a product was/wasn't imported, ATDW status, import decisions. Keywords: ATDW, import, imported, Atlas, sync, inactive product, expired product, postcode filtering.
+2. "atdw_import" - Questions about ATDW (Australian Tourism Data Warehouse) product imports, categories, data, or status. This includes questions about a specific product's categories, why something was/wasn't imported, ATDW status, or how import data maps to the website.
+   IMPORTANT: If the page URL contains "/admin/entries/products/", this is someone viewing a specific product in the admin panel - use "atdw_import" and extract the product name from the URL slug (e.g. "/admin/entries/products/13229-wycheproof-caravan-park" -> product name "Wycheproof Caravan Park").
+   Also use "atdw_import" when the question mentions: categories on a product, import, ATDW, Atlas, sync, inactive/expired product, postcode filtering, or tourism categories like "Stay", "See & Do", "Eat & Drink".
 
 3. "general" - General questions that don't fit the above.
 
@@ -48,13 +50,13 @@ Respond with valid JSON only, no markdown:
   "pageUri": "/the-page-path" or null,
   "pageName": "human readable page name" or null,
   "componentType": "products" (lowercase, the component being asked about),
-  "productNames": ["Product Name 1", "Product Name 2"] (business/product names mentioned),
+  "productNames": ["Product Name 1"] (business/product names mentioned OR extracted from admin URL slug),
   "atdwProductId": "ATDW Atlas ID if mentioned" or null,
   "questionType": "why_included" | "why_excluded" | "what_shows" | "why_order" | "general"
 }
 
 Question types:
-- "why_included": asking why a specific product/item appears or was imported
+- "why_included": asking why a specific product/item appears, was imported, or has certain data
 - "why_excluded": asking why a specific product/item does NOT appear or wasn't imported
 - "what_shows": asking what products/items show on a page or were imported
 - "why_order": asking about the ordering/sorting of results

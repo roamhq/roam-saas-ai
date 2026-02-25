@@ -172,7 +172,6 @@ interface ResolvedData {
   targetProductIds: number[];
   codeContext: string;
   timing: Record<string, number>;
-  error?: Response;
 }
 
 async function resolveData(
@@ -231,18 +230,15 @@ async function resolveData(
 
     // -----------------------------------------------------------------------
     // Page-builder domain (existing path)
+    //
+    // No early error returns - always pass through to the LLM.
+    // When data is thin, the LLM asks clarifying questions.
     // -----------------------------------------------------------------------
     const pageUri = intent.pageUri ?? body.pageUri;
     if (!pageUri) {
+      const codeContext = await codeContextPromise;
       return {
-        intent, config: null, trace: [], targetProductIds: [], codeContext: "", timing,
-        error: Response.json({
-          explanation:
-            "I need to know which page you're asking about. " +
-            "Could you include the page URL or name?",
-          trace: [],
-          config: null,
-        }),
+        intent, config: null, trace: [], targetProductIds: [], codeContext, timing,
       };
     }
 
@@ -251,21 +247,30 @@ async function resolveData(
     timing.resolveEntities = Date.now() - t0;
 
     if (blocks.length === 0) {
+      // No matching blocks - still pass through to LLM with context
       const allBlocks = await resolvePageBlocks(db, schema, pageUri);
       const availableTypes = [...new Set(allBlocks.map((b) => b.blockType))];
+      const codeContext = await codeContextPromise;
+
+      // Give the LLM context about what we found (or didn't)
+      intent.pageName = intent.pageName ?? pageUri;
 
       return {
-        intent, config: null, trace: [], targetProductIds: [], codeContext: "", timing,
-        error: Response.json({
-          explanation:
-            `I couldn't find a "${componentType}" component on the page "${pageUri}". ` +
-            (availableTypes.length > 0
-              ? `This page has these components: ${availableTypes.join(", ")}.`
-              : "Check that the URL is correct and the page has page builder blocks."),
-          trace: [],
-          config: null,
-          availableComponents: availableTypes,
-        }),
+        intent,
+        config: null,
+        trace: [{
+          step: "block_config" as TraceStep["step"],
+          description: availableTypes.length > 0
+            ? `No "${componentType}" component found on "${pageUri}". Available components: ${availableTypes.join(", ")}.`
+            : `No page builder blocks found at "${pageUri}". This may be an admin URL, a product page, or not a page-builder page.`,
+          count: 0,
+          productIds: [],
+          targetPresent: null,
+          details: { availableComponents: availableTypes, requestedType: componentType },
+        }],
+        targetProductIds: [],
+        codeContext,
+        timing,
       };
     }
 
@@ -329,7 +334,6 @@ async function handleExplain(
 ): Promise<Response> {
   try {
     const data = await resolveData(request, env);
-    if (data.error) return data.error;
 
     const t0 = Date.now();
     const explanation = await generateExplanation(
@@ -382,7 +386,6 @@ async function handleExplainStream(
 ): Promise<Response> {
   try {
     const data = await resolveData(request, env);
-    if (data.error) return data.error;
 
     const encoder = new TextEncoder();
     const { readable, writable } = new TransformStream();

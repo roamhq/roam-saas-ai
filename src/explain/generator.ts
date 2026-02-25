@@ -111,6 +111,19 @@ export function streamExplanation(
 // ---------------------------------------------------------------------------
 
 function buildSystemPrompt(domain: string = "page_component"): string {
+  // Shared conversational rules for all domains
+  const conversationalRules = `
+
+Conversational rules:
+- You are a chatbot. ALWAYS respond with something helpful - never leave the user with nothing.
+- If the diagnostic data is empty or you don't have enough context, ask a friendly clarifying question.
+  For example: "I'd love to help with that! Could you tell me which product you're asking about?" or
+  "I can see you're looking at a page, but I'm not sure which component you mean. Could you describe what you're seeing?"
+- If the data doesn't fully answer their question, share what you CAN see and ask about the rest.
+- Read URL clues: if the page URL contains "/admin/entries/products/", they're looking at a specific product in the admin panel.
+- Keep it to 2-3 short paragraphs. Be warm but concise - respect their time.
+- Never reference internal step names, database tables, trace data, or technical jargon.`;
+
   if (domain === "atdw_import") {
     return `You are a friendly, knowledgeable support person helping tourism website managers understand how ATDW (Australian Tourism Data Warehouse) products are imported into their website.
 
@@ -124,26 +137,22 @@ Writing style:
 - Explain the WHY naturally: "Because the product's postcode 3500 (Mildura) isn't in any of your enabled regions..."
 - If a product wasn't imported, explain which specific check prevented it
 - If a product is inactive or expired, explain what that means in practical terms
-- Mention the ATDW category (accommodation, event, attraction, etc.) in plain terms
-- Keep it to 2-3 short paragraphs. Be warm but concise - respect their time
-- Never reference internal step names, database tables, or technical jargon`;
+- Mention the ATDW category (accommodation, event, attraction, etc.) in plain terms` + conversationalRules;
   }
 
-  return `You are a friendly, knowledgeable support person helping tourism website managers understand why their pages display certain listings.
+  return `You are a friendly, knowledgeable support person helping tourism website managers understand their website.
 
-The user manages a tourism website on the Roam platform. Pages have components like "Products" that display tourism businesses, experiences, and deals. These components have settings (categories, regions, tiers) that control what gets shown.
+The user manages a tourism website on the Roam platform. Pages have components like "Products" that display tourism businesses, experiences, and deals. These components have settings (categories, regions, tiers) that control what gets shown. Products can also be imported from the ATDW (Australian Tourism Data Warehouse).
 
-You have been given diagnostic data about how the component's settings produced the results on their page. Use this data to answer their question accurately - but explain it in everyday language as if you were a colleague walking them through it.
+You have been given diagnostic data (which may be partial or empty). Use whatever data you have to answer their question accurately - but explain it in everyday language as if you were a colleague walking them through it.
 
 Writing style:
 - Talk about "the component settings" or "how this is configured", never "the filter chain" or "step 3"
 - Use the actual names of categories, regions, and products - never IDs or technical references
 - Explain the WHY naturally: "Because the region setting resolved to Talbot, and no listings have a Talbot postcode..."
-- If products appear from unexpected places, explain the mechanism simply: "When no listings match the region, the component falls back to showing everything in the selected category"
-- If the display limit cuts results, mention it naturally: "There are actually 317 matching listings, but the component is set to show only 10"
-- If order is randomised, mention that what they see will change on each page load
-- Keep it to 2-3 short paragraphs. Be warm but concise - respect their time
-- Never reference internal step names, trace data, or technical jargon`;
+- If products appear from unexpected places, explain the mechanism simply
+- If the display limit cuts results, mention it naturally
+- If order is randomised, mention that what they see will change on each page load` + conversationalRules;
 }
 
 function buildUserPrompt(
@@ -175,19 +184,27 @@ function buildUserPrompt(
     return prompt;
   }
 
-  const configSummary = config ? formatConfig(config as ComponentConfig) : "No configuration data available for this component.";
+  const configSummary = config ? formatConfig(config as ComponentConfig) : null;
 
   let prompt = `The client asked: "${question}"\n\n`;
-  prompt += `Page: ${intent.pageUri ?? "unknown"}\n`;
+  prompt += `Page URL: ${intent.pageUri ?? "not provided"}\n`;
 
   if (targetProductIds.length > 0) {
     prompt += `They're asking about specific products (IDs: ${targetProductIds.join(", ")})\n`;
   }
 
-  prompt += `\nHere's how this component is configured:\n${configSummary}\n`;
-  prompt += `\nHere's what the data shows:\n${traceSummary}\n`;
+  if (configSummary) {
+    prompt += `\nHere's how this component is configured:\n${configSummary}\n`;
+  }
+
+  if (traceSummary) {
+    prompt += `\nHere's what the data shows:\n${traceSummary}\n`;
+  } else {
+    prompt += `\nNo diagnostic data was collected. This might mean the page URL doesn't match a page-builder page, or the question is about something we need more context for.\n`;
+  }
+
   prompt += codeSection;
-  prompt += `\nUsing the data above (and the source code for context on how the system works), explain this to the client in plain, friendly language. Do NOT mention code, files, functions, or variables.`;
+  prompt += `\nUsing whatever data you have above, respond to the client in plain, friendly language. If you don't have enough data to answer their question, ask a helpful clarifying question. Do NOT mention code, files, functions, or variables.`;
 
   return prompt;
 }
