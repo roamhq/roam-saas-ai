@@ -370,6 +370,7 @@ async function handleExplain(
       debug: {
         intent: data.intent,
         timing: data.timing,
+        codeContext: data.codeContext.slice(0, 2000) || "(empty)",
       },
     };
 

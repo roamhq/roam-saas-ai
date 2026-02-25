@@ -39,6 +39,7 @@ export interface ExplainResponse {
   debug?: {
     intent: ParsedIntent;
     timing: Record<string, number>;
+    codeContext?: string;
   };
 }
 
