@@ -68,29 +68,32 @@ export async function retrieveContext(
 }
 
 /**
- * Build a domain-aware retrieval query.
+ * Build a retrieval query that combines domain context with the user's
+ * actual question. This ensures AutoRAG finds code relevant to what
+ * was asked - not just generic import/component code every time.
  *
  * The query is phrased to find relevant source code - not to answer
  * the user's question directly. AutoRAG retrieves code chunks;
  * the LLM uses those chunks plus data facts to generate the answer.
  */
 function buildRetrievalQuery(intent: ParsedIntent): string {
+  // The user's question drives retrieval - it's the strongest signal
+  // for what code is relevant. We add domain context as a fallback
+  // so we still get useful results for vague questions.
+  const question = intent.rawQuestion;
+
   if (intent.domain === "atdw_import") {
-    // Retrieve ATDW import pipeline code
     return (
-      "ATDW product import process: " +
-      "How does ProductService createRecord decide whether to import a product? " +
-      "How does postcode matching work with product regions? " +
-      "How does ImportService create or update Craft entries from ATDW data? " +
-      "How does AtdwProductFormatter map ATDW categories to product categories?"
+      `${question} ` +
+      `ATDW product import: how does the Roam platform handle this? ` +
+      `Include relevant formatters, services, and import logic.`
     );
   }
 
-  // Page-component domain - retrieve component rendering code
   const componentType = intent.componentType || "products";
   return (
-    `How does the ${componentType} component filter and display results? ` +
-    `Include the VariableService method, template source, and filter logic. ` +
-    `How are categories, regions, and tiers used to select products?`
+    `${question} ` +
+    `How does the ${componentType} component work on the Roam platform? ` +
+    `Include template source, VariableService methods, and filter logic.`
   );
 }
