@@ -1,10 +1,10 @@
 name: Push Theme Knowledge Base
 
 # Reusable workflow - called from each theme repo's deployment.yml
-# Converts component templates to Markdown and pushes to R2 for AI Search indexing.
+# Converts all theme templates to Markdown and pushes to R2 for AI Search indexing.
 #
 # AI Search doesn't support .twig files directly, so we wrap each source file
-# in a Markdown code block with metadata (file path, theme, component type).
+# in a Markdown code block with metadata (file path, theme, template context).
 #
 # Usage in theme repo:
 #   jobs:
@@ -39,22 +39,26 @@ jobs:
           mkdir -p "$OUTDIR"
           THEME="${{ inputs.theme }}"
 
-          find app/templates/components -type f \( -name "*.twig" -o -name "*.js" \) | while read src; do
-            component=$(echo "$src" | sed 's|app/templates/components/||' | cut -d/ -f1)
+          # Index ALL twig, html, and js files under app/templates
+          find app/templates -type f \( -name "*.twig" -o -name "*.html" -o -name "*.js" \) | while read src; do
+            # Derive context from path: app/templates/components/Products/... -> components > Products
+            # app/templates/objects/product/details.twig -> objects > product
+            rel_path=$(echo "$src" | sed 's|app/templates/||')
+            context=$(dirname "$rel_path" | tr '/' ' > ')
             filename=$(basename "$src")
             ext="${filename##*.}"
+            name="${filename%.*}"
 
-            rel_path=$(echo "$src" | sed 's|app/templates/components/||')
-            out_dir="${OUTDIR}/themes/${THEME}/components/$(dirname "$rel_path")"
+            out_dir="${OUTDIR}/themes/${THEME}/$(dirname "$rel_path")"
             out_file="${out_dir}/${filename}.md"
             mkdir -p "$out_dir"
 
             {
-              echo "# ${component} Component - ${filename}"
+              echo "# ${name} - ${THEME} theme"
               echo ""
               echo "**Theme**: ${THEME}"
-              echo "**Component**: ${component}"
-              echo "**File**: ${src}"
+              echo "**Source**: ${src}"
+              echo "**Context**: ${context}"
               echo "**Type**: ${ext}"
               echo ""
               echo '```'"${ext}"
