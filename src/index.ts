@@ -19,7 +19,6 @@ import {
   generateExplanation,
   streamExplanation,
 } from "./explain/generator";
-import { retrieveContext } from "./knowledge/search";
 import WIDGET_JS from "./widget.js.txt";
 
 // CORS headers for chatbot frontends
@@ -180,7 +179,7 @@ interface ResolvedData {
   config: DomainConfig | null;
   trace: TraceStep[];
   targetProductIds: number[];
-  codeContext: string;
+  tenant: string;
   history: ChatMessage[];
   timing: Record<string, number>;
 }
@@ -209,10 +208,7 @@ async function resolveData(
 
   const componentType = intent.componentType;
 
-  // Retrieve code context from AutoRAG (runs in parallel with DB work)
-  const codeContextPromise = retrieveContext(env, intent, tenant);
-
-  // Resolve entities via DB
+  // Resolve entities via DB (code retrieval now handled by aiSearch in generator)
   t0 = Date.now();
   const db = createConnection(env, tenant);
 
@@ -224,10 +220,7 @@ async function resolveData(
     // -----------------------------------------------------------------------
     if (intent.domain === "atdw_import") {
       t0 = Date.now();
-      const [atdwResult, codeContext] = await Promise.all([
-        traceAtdwImport(db, schema, intent),
-        codeContextPromise,
-      ]);
+      const atdwResult = await traceAtdwImport(db, schema, intent);
       timing.filterChain = Date.now() - t0;
 
       return {
@@ -235,7 +228,7 @@ async function resolveData(
         config: atdwResult.config,
         trace: atdwResult.trace,
         targetProductIds: [],
-        codeContext,
+        tenant,
         history,
         timing,
       };
@@ -249,9 +242,8 @@ async function resolveData(
     // -----------------------------------------------------------------------
     const pageUri = intent.pageUri ?? body.pageUri;
     if (!pageUri) {
-      const codeContext = await codeContextPromise;
       return {
-        intent, config: null, trace: [], targetProductIds: [], codeContext, history, timing,
+        intent, config: null, trace: [], targetProductIds: [], tenant, history, timing,
       };
     }
 
@@ -263,7 +255,6 @@ async function resolveData(
       // No matching blocks - still pass through to LLM with context
       const allBlocks = await resolvePageBlocks(db, schema, pageUri);
       const availableTypes = [...new Set(allBlocks.map((b) => b.blockType))];
-      const codeContext = await codeContextPromise;
 
       // Give the LLM context about what we found (or didn't)
       intent.pageName = intent.pageName ?? pageUri;
@@ -282,7 +273,7 @@ async function resolveData(
           details: { availableComponents: availableTypes, requestedType: componentType },
         }],
         targetProductIds: [],
-        codeContext,
+        tenant,
         history,
         timing,
       };
@@ -322,14 +313,12 @@ async function resolveData(
       });
     }
 
-    const codeContext = await codeContextPromise;
-
     return {
       intent,
       config: traceResult.config,
       trace: traceResult.trace,
       targetProductIds,
-      codeContext,
+      tenant,
       history,
       timing,
     };
@@ -351,26 +340,26 @@ async function handleExplain(
     const data = await resolveData(request, env);
 
     const t0 = Date.now();
-    const explanation = await generateExplanation(
+    const result = await generateExplanation(
       env,
       data.intent.rawQuestion,
       data.intent,
       data.config,
       data.trace,
       data.targetProductIds,
-      data.codeContext,
-      data.history
+      data.history,
+      data.tenant
     );
     data.timing.generation = Date.now() - t0;
 
     const response: ExplainResponse = {
-      explanation,
+      explanation: result.explanation,
       trace: data.trace,
       config: data.config,
       debug: {
         intent: data.intent,
         timing: data.timing,
-        codeContext: data.codeContext.slice(0, 2000) || "(empty)",
+        codeContext: result.codeContext.slice(0, 2000) || "(empty)",
       },
     };
 
@@ -435,8 +424,8 @@ async function handleExplainStream(
             data.config,
             data.trace,
             data.targetProductIds,
-            data.codeContext,
-            data.history
+            data.history,
+            data.tenant
           );
 
           const reader = stream.getReader();

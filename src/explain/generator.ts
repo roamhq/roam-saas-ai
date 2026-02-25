@@ -9,13 +9,35 @@ import type {
   TraceStepName,
 } from "../types";
 
-// Workers AI models - cast required because @cloudflare/workers-types
-// doesn't include all available model IDs in its union type
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const TEXT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast" as any;
+/**
+ * AutoRAG aiSearch request with model field.
+ * The `model` parameter exists in the API but isn't in @cloudflare/workers-types yet.
+ */
+interface AiSearchRequest {
+  query: string;
+  model?: string;
+  system_prompt?: string;
+  rewrite_query?: boolean;
+  max_num_results?: number;
+  ranking_options?: { score_threshold?: number };
+  reranking?: { enabled?: boolean };
+  stream?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Non-streaming generation via aiSearch()
+// ---------------------------------------------------------------------------
 
 /**
- * Generate a plain-language explanation using Workers AI (non-streaming).
+ * Generate an explanation using AutoRAG aiSearch().
+ *
+ * This replaces the old two-step approach (search() + AI.run()) with a
+ * single call that handles both code retrieval and generation. A capable
+ * model (Claude Sonnet, Gemini Pro) reasons about the retrieved source
+ * code directly - no custom tracers needed for code understanding.
+ *
+ * DB trace data is embedded in the system prompt so the model has both
+ * code context (from AutoRAG) and live data facts (from Hyperdrive).
  */
 export async function generateExplanation(
   env: Env,
@@ -24,36 +46,50 @@ export async function generateExplanation(
   config: DomainConfig | null,
   trace: TraceStep[],
   targetProductIds: number[],
-  codeContext: string = "",
-  history: ChatMessage[] = []
-): Promise<string> {
-  const systemPrompt = buildSystemPrompt(intent.domain);
-  const userPrompt = buildUserPrompt(question, intent, config, trace, targetProductIds, codeContext);
-  const messages = buildMessages(systemPrompt, userPrompt, history);
+  history: ChatMessage[] = [],
+  tenant?: string
+): Promise<{ explanation: string; codeContext: string }> {
+  const systemPrompt = buildSystemPrompt(intent, config, trace, targetProductIds, history);
+  const query = buildQuery(question, intent, tenant);
 
   try {
-    const result = await env.AI.run(TEXT_MODEL, {
-      messages,
-      max_tokens: 512,
-      temperature: 0.3,
-    });
+    const autorag = env.AI.autorag(env.AUTORAG_NAME);
+    const response = await autorag.aiSearch({
+      query,
+      system_prompt: systemPrompt,
+      rewrite_query: true,
+      max_num_results: 10,
+      reranking: { enabled: true },
+      ranking_options: { score_threshold: 0.2 },
+    } as AiSearchRequest as Parameters<typeof autorag.aiSearch>[0]);
 
-    const text =
-      typeof result === "string"
-        ? result
-        : "response" in result
-          ? (result as { response: string }).response
-          : "I wasn't able to generate an explanation. Please check the trace data for details.";
+    // Extract code context from search results for debug output
+    const codeContext = (response.data ?? [])
+      .map((r) => {
+        const text = r.content?.map((c) => c.text ?? "").join("\n") ?? "";
+        return `--- ${r.filename ?? "document"} (score: ${r.score?.toFixed(2) ?? "?"}) ---\n${text}`;
+      })
+      .join("\n\n");
 
-    return text;
+    return {
+      explanation: response.response ?? "I wasn't able to generate an explanation. Please try rephrasing your question.",
+      codeContext,
+    };
   } catch (error) {
-    console.error("Generation failed:", error);
-    return generateFallbackExplanation(intent, config, trace, targetProductIds);
+    console.error("aiSearch generation failed:", error);
+    return {
+      explanation: generateFallbackExplanation(intent, config, trace, targetProductIds),
+      codeContext: "",
+    };
   }
 }
 
+// ---------------------------------------------------------------------------
+// Streaming generation via aiSearch()
+// ---------------------------------------------------------------------------
+
 /**
- * Stream a plain-language explanation using Workers AI.
+ * Stream an explanation using AutoRAG aiSearch() with stream: true.
  * Returns a ReadableStream of SSE-formatted text chunks.
  */
 export function streamExplanation(
@@ -63,39 +99,47 @@ export function streamExplanation(
   config: DomainConfig | null,
   trace: TraceStep[],
   targetProductIds: number[],
-  codeContext: string = "",
-  history: ChatMessage[] = []
+  history: ChatMessage[] = [],
+  tenant?: string
 ): ReadableStream {
-  const systemPrompt = buildSystemPrompt(intent.domain);
-  const userPrompt = buildUserPrompt(question, intent, config, trace, targetProductIds, codeContext);
-  const messages = buildMessages(systemPrompt, userPrompt, history);
-
+  const systemPrompt = buildSystemPrompt(intent, config, trace, targetProductIds, history);
+  const query = buildQuery(question, intent, tenant);
   const encoder = new TextEncoder();
 
   return new ReadableStream({
     async start(controller) {
       try {
-        const stream = await env.AI.run(TEXT_MODEL, {
-          messages,
-          max_tokens: 512,
-          temperature: 0.3,
+        const autorag = env.AI.autorag(env.AUTORAG_NAME);
+        const response = await autorag.aiSearch({
+          query,
+          system_prompt: systemPrompt,
+          rewrite_query: true,
+          max_num_results: 10,
+          reranking: { enabled: true },
+          ranking_options: { score_threshold: 0.2 },
           stream: true,
-        });
+        } as AiSearchRequest as Parameters<typeof autorag.aiSearch>[0]);
 
-        // Workers AI streaming returns a ReadableStream
-        const reader = (stream as ReadableStream).getReader();
+        // aiSearch with stream: true returns a Response object
+        const body = (response as unknown as Response).body;
+        if (!body) {
+          const fallback = generateFallbackExplanation(intent, config, trace, targetProductIds);
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ response: fallback })}\n\n`));
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          controller.close();
+          return;
+        }
 
+        const reader = body.getReader();
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          // Forward the raw SSE chunks - already formatted as
-          // data: {"response":"token"}\n\n
           controller.enqueue(value);
         }
 
         controller.close();
       } catch (error) {
-        console.error("Stream generation failed:", error);
+        console.error("Stream aiSearch failed:", error);
         const fallback = generateFallbackExplanation(intent, config, trace, targetProductIds);
         controller.enqueue(encoder.encode(`data: ${JSON.stringify({ response: fallback })}\n\n`));
         controller.enqueue(encoder.encode("data: [DONE]\n\n"));
@@ -106,60 +150,71 @@ export function streamExplanation(
 }
 
 // ---------------------------------------------------------------------------
-// Message construction (internal)
+// Query construction
 // ---------------------------------------------------------------------------
 
-type AiMessage = { role: "system" | "user" | "assistant"; content: string };
-
 /**
- * Build the full messages array for the LLM, including conversation history.
- *
- * Structure:
- *   [system] system prompt (always first)
- *   [user]   prior turn 1 (from history)
- *   [asst]   prior turn 1 response (from history)
- *   ...
- *   [user]   current question + diagnostic data (always last)
- *
- * History is trimmed to keep total content under ~3000 chars to avoid
- * blowing the 8B model's effective attention budget.
+ * Build the aiSearch query. This is what AutoRAG uses for both retrieval
+ * (finding relevant code) and generation (answering the question).
+ * Include tenant/theme name so embeddings prefer the right theme's templates.
  */
-function buildMessages(
-  systemPrompt: string,
-  userPrompt: string,
-  history: ChatMessage[]
-): AiMessage[] {
-  const messages: AiMessage[] = [{ role: "system", content: systemPrompt }];
+function buildQuery(question: string, intent: ParsedIntent, tenant?: string): string {
+  const themeHint = tenant ? ` on the ${tenant} theme` : "";
 
-  if (history.length > 0) {
-    // Trim history to fit - keep recent turns, truncate long messages
-    let historyBudget = 3000;
-    const trimmed: AiMessage[] = [];
-
-    for (const msg of history) {
-      const content = msg.content.length > 500
-        ? msg.content.slice(0, 500) + "..."
-        : msg.content;
-      historyBudget -= content.length;
-      if (historyBudget < 0) break;
-      trimmed.push({ role: msg.role, content });
-    }
-
-    messages.push(...trimmed);
+  if (intent.domain === "atdw_import") {
+    return (
+      `${question} ` +
+      `ATDW product import${themeHint}: how does the Roam platform handle this? ` +
+      `Include relevant formatters, services, and template rendering.`
+    );
   }
 
-  messages.push({ role: "user", content: userPrompt });
-  return messages;
+  const componentType = intent.componentType || "products";
+  return (
+    `${question} ` +
+    `How does the ${componentType} component work${themeHint}? ` +
+    `Include template source, VariableService methods, and filter logic.`
+  );
 }
 
 // ---------------------------------------------------------------------------
-// Prompt construction (internal)
+// System prompt construction
 // ---------------------------------------------------------------------------
 
-function buildSystemPrompt(domain: string = "page_component"): string {
-  // Shared conversational rules for all domains
-  const conversationalRules = `
+/**
+ * Build the system prompt with persona + DB trace data.
+ *
+ * The system prompt serves two purposes:
+ * 1. Persona and response style instructions
+ * 2. Structured data from DB queries (trace steps, config, etc.)
+ *
+ * AutoRAG injects the retrieved code context automatically - we don't
+ * need to include it here. The model sees both the system prompt AND
+ * the retrieved code chunks.
+ */
+function buildSystemPrompt(
+  intent: ParsedIntent,
+  config: DomainConfig | null,
+  trace: TraceStep[],
+  targetProductIds: number[],
+  history: ChatMessage[]
+): string {
+  const persona = buildPersona(intent.domain);
+  const dataContext = buildDataContext(intent, config, trace, targetProductIds);
+  const historyContext = buildHistoryContext(history);
 
+  return `${persona}
+
+${dataContext}
+${historyContext}
+Important: AutoRAG has retrieved relevant source code from the Roam platform codebase.
+Use this code to understand HOW the system works - but NEVER reference code, filenames,
+function names, or technical details in your response. Translate code behaviour into
+plain-language explanations.`;
+}
+
+function buildPersona(domain: string): string {
+  const conversationalRules = `
 Conversational rules:
 - You are a chatbot. ALWAYS respond with something helpful - never leave the user with nothing.
 - If the diagnostic data is empty or you don't have enough context, ask a friendly clarifying question.
@@ -175,7 +230,7 @@ Conversational rules:
 
 The user manages a tourism website on the Roam platform. Products from the ATDW Atlas system are automatically imported based on configured categories, regions, and postcodes. The import process checks each product against the site's settings to decide whether to import it.
 
-You have been given diagnostic data about a specific product's import journey. Use this data to answer their question accurately - but explain it in everyday language as if you were a colleague walking them through it.
+You have been given diagnostic data about a specific product's import journey, AND relevant source code from the platform has been retrieved automatically. Use both to answer accurately - but explain in everyday language.
 
 Writing style:
 - Talk about "the import process" or "how the sync works", never "the reason column" or "createRecord"
@@ -190,7 +245,7 @@ Writing style:
 
 The user manages a tourism website on the Roam platform. Pages have components like "Products" that display tourism businesses, experiences, and deals. These components have settings (categories, regions, tiers) that control what gets shown. Products can also be imported from the ATDW (Australian Tourism Data Warehouse).
 
-You have been given diagnostic data (which may be partial or empty). Use whatever data you have to answer their question accurately - but explain it in everyday language as if you were a colleague walking them through it.
+You have been given diagnostic data (which may be partial or empty), AND relevant source code from the platform has been retrieved automatically. Use both to answer accurately - but explain in everyday language.
 
 Writing style:
 - Talk about "the component settings" or "how this is configured", never "the filter chain" or "step 3"
@@ -201,67 +256,79 @@ Writing style:
 - If order is randomised, mention that what they see will change on each page load` + conversationalRules;
 }
 
-function buildUserPrompt(
-  question: string,
+function buildDataContext(
   intent: ParsedIntent,
   config: DomainConfig | null,
   trace: TraceStep[],
-  targetProductIds: number[],
-  codeContext: string = ""
+  targetProductIds: number[]
 ): string {
   const traceSummary = formatTrace(trace);
-  const codeSection = codeContext
-    ? `\nRelevant source code (for your understanding - NEVER reference code, filenames, or function names in your response):\n${codeContext}\n`
-    : "";
 
   if (intent.domain === "atdw_import" && config && "domain" in config && config.domain === "atdw_import") {
     const atdwConfig = config as AtdwImportConfig;
-    let prompt = `The client asked: "${question}"\n\n`;
-    prompt += `ATDW Product: ${atdwConfig.productName}\n`;
-    prompt += `Organisation: ${atdwConfig.organisation ?? "unknown"}\n`;
-    prompt += `Category: ${atdwConfig.category}\n`;
-    prompt += `ATDW Status: ${atdwConfig.atdwStatus}\n`;
-    prompt += `Location: ${atdwConfig.city ?? "unknown"} (postcode: ${atdwConfig.postcode ?? "unknown"})\n`;
-    prompt += `Imported: ${atdwConfig.imported ? "Yes" : "No"}\n`;
-    prompt += `Has website entry: ${atdwConfig.hasEntry ? "Yes" : "No"}\n`;
-    prompt += `\nHere's what we found in the data:\n${traceSummary}\n`;
-    prompt += codeSection;
-    prompt += `\nUsing the data above (and the source code for context on how the system works), explain this to the client in plain, friendly language. Do NOT mention code, files, functions, or variables.`;
-    return prompt;
+    let ctx = `\n--- DATABASE DIAGNOSTIC DATA ---\n`;
+    ctx += `ATDW Product: ${atdwConfig.productName}\n`;
+    ctx += `Organisation: ${atdwConfig.organisation ?? "unknown"}\n`;
+    ctx += `Category: ${atdwConfig.category}\n`;
+    ctx += `ATDW Status: ${atdwConfig.atdwStatus}\n`;
+    ctx += `Location: ${atdwConfig.city ?? "unknown"} (postcode: ${atdwConfig.postcode ?? "unknown"})\n`;
+    ctx += `Imported: ${atdwConfig.imported ? "Yes" : "No"}\n`;
+    ctx += `Has website entry: ${atdwConfig.hasEntry ? "Yes" : "No"}\n`;
+    if (traceSummary) ctx += `\nData trace:\n${traceSummary}\n`;
+    ctx += `--- END DIAGNOSTIC DATA ---\n`;
+    return ctx;
   }
 
-  const configSummary = config ? formatConfig(config as ComponentConfig) : null;
-
-  let prompt = `The client asked: "${question}"\n\n`;
-  prompt += `Page URL: ${intent.pageUri ?? "not provided"}\n`;
+  let ctx = `\n--- DATABASE DIAGNOSTIC DATA ---\n`;
+  ctx += `Page URL: ${intent.pageUri ?? "not provided"}\n`;
 
   if (targetProductIds.length > 0) {
-    prompt += `They're asking about specific products (IDs: ${targetProductIds.join(", ")})\n`;
+    ctx += `Asking about specific products (IDs: ${targetProductIds.join(", ")})\n`;
   }
 
-  if (configSummary) {
-    prompt += `\nHere's how this component is configured:\n${configSummary}\n`;
+  if (config && !("domain" in config)) {
+    ctx += `\nComponent configuration:\n${formatConfig(config as ComponentConfig)}\n`;
   }
 
   if (traceSummary) {
-    prompt += `\nHere's what the data shows:\n${traceSummary}\n`;
+    ctx += `\nData trace:\n${traceSummary}\n`;
   } else {
-    prompt += `\nNo diagnostic data was collected. This might mean the page URL doesn't match a page-builder page, or the question is about something we need more context for.\n`;
+    ctx += `\nNo diagnostic data collected. The page URL may not match a page-builder page, or the question is about something broader.\n`;
   }
 
-  prompt += codeSection;
-  prompt += `\nUsing whatever data you have above, respond to the client in plain, friendly language. If you don't have enough data to answer their question, ask a helpful clarifying question. Do NOT mention code, files, functions, or variables.`;
-
-  return prompt;
+  ctx += `--- END DIAGNOSTIC DATA ---\n`;
+  return ctx;
 }
+
+function buildHistoryContext(history: ChatMessage[]): string {
+  if (history.length === 0) return "";
+
+  // Include recent history so the model has conversation context
+  let budget = 3000;
+  const lines: string[] = ["\n--- CONVERSATION HISTORY ---"];
+
+  for (const msg of history) {
+    const content = msg.content.length > 500
+      ? msg.content.slice(0, 500) + "..."
+      : msg.content;
+    budget -= content.length;
+    if (budget < 0) break;
+    lines.push(`${msg.role === "user" ? "Client" : "You"}: ${content}`);
+  }
+
+  lines.push("--- END HISTORY ---\n");
+  return lines.join("\n");
+}
+
+// ---------------------------------------------------------------------------
+// Formatting helpers (unchanged)
+// ---------------------------------------------------------------------------
 
 function formatConfig(config: ComponentConfig): string {
   const lines: string[] = [];
 
   if (config.categories.length > 0) {
-    lines.push(
-      `Categories: ${config.categories.map((c) => c.title).join(", ")}`
-    );
+    lines.push(`Categories: ${config.categories.map((c) => c.title).join(", ")}`);
   } else {
     lines.push("Categories: none selected");
   }
@@ -279,21 +346,15 @@ function formatConfig(config: ComponentConfig): string {
   }
 
   if (config.taxonomy.length > 0) {
-    lines.push(
-      `Taxonomy: ${config.taxonomy.map((t) => t.title).join(", ")}`
-    );
+    lines.push(`Taxonomy: ${config.taxonomy.map((t) => t.title).join(", ")}`);
   }
 
   if (config.explicitProducts.length > 0) {
-    lines.push(
-      `Explicitly selected products: ${config.explicitProducts.map((p) => p.title).join(", ")}`
-    );
+    lines.push(`Explicitly selected products: ${config.explicitProducts.map((p) => p.title).join(", ")}`);
   }
 
   if (config.excludeProducts.length > 0) {
-    lines.push(
-      `Excluded products: ${config.excludeProducts.map((p) => p.title).join(", ")}`
-    );
+    lines.push(`Excluded products: ${config.excludeProducts.map((p) => p.title).join(", ")}`);
   }
 
   lines.push(`Limit: ${config.limit}`);
@@ -306,7 +367,6 @@ function formatConfig(config: ComponentConfig): string {
 
 /** Map internal step names to human-readable descriptions */
 const stepLabels: Record<TraceStepName, string> = {
-  // Page-builder steps
   resolve_categories: "Category settings",
   resolve_regions: "Region settings",
   region_to_products: "Finding listings in those regions",
@@ -317,7 +377,6 @@ const stepLabels: Record<TraceStepName, string> = {
   sort: "Sorting",
   limit: "Display limit",
   block_config: "Component configuration",
-  // ATDW import steps - data collection
   atdw_lookup: "ATDW product lookup",
   atdw_region_config: "Configured import regions",
   atdw_postcode_match: "Postcode vs configured regions",
@@ -361,7 +420,7 @@ function formatTrace(trace: TraceStep[]): string {
 
 /**
  * Generate a basic explanation without the LLM, using just trace data.
- * Used as fallback when Workers AI is unavailable.
+ * Used as fallback when aiSearch is unavailable.
  */
 function generateFallbackExplanation(
   intent: ParsedIntent,
@@ -371,7 +430,6 @@ function generateFallbackExplanation(
 ): string {
   const lines: string[] = [];
 
-  // ATDW domain fallback
   if (intent.domain === "atdw_import" && config && "domain" in config && config.domain === "atdw_import") {
     const atdwConfig = config as AtdwImportConfig;
     lines.push(`Here's what I found about the ATDW import for "${atdwConfig.productName}":\n`);
@@ -416,13 +474,10 @@ function generateFallbackExplanation(
     }
 
     if (compConfig.explicitProducts.length > 0) {
-      lines.push(
-        `${compConfig.explicitProducts.length} products were explicitly selected.`
-      );
+      lines.push(`${compConfig.explicitProducts.length} products were explicitly selected.`);
     }
   }
 
-  // Final results
   if (trace.length > 0) {
     const finalStep = trace[trace.length - 1];
     const compConfig = config && !("domain" in config) ? config as ComponentConfig : null;
@@ -431,7 +486,6 @@ function generateFallbackExplanation(
         (compConfig ? ` (limit: ${compConfig.limit}, order: ${compConfig.order}).` : ".")
     );
 
-    // Target product status
     if (targetProductIds.length > 0) {
       const firstAbsent = trace.find((s) => s.targetPresent === false);
 
