@@ -276,7 +276,7 @@ const stepLabels: Record<TraceStepName, string> = {
   atdw_region_config: "Configured import regions",
   atdw_postcode_match: "Postcode vs configured regions",
   atdw_status_eval: "Record status and import state",
-  atdw_category_mapping: "Category mapping",
+  atdw_category_mapping: "Category and sub-type mapping",
   atdw_entry_state: "Website entry state",
   atdw_entry_link: "Website listing",
 };

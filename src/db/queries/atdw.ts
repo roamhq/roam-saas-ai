@@ -93,8 +93,7 @@ export async function getAtdwImportStats(
 
 // ---------------------------------------------------------------------------
 // Region / postcode resolution
-// Mirrors CraftHelper::hasFoundProductRegionsByPostcode() and
-// ProductService::buildParameters() region postcode collection.
+// Data collection: enabled regions with their configured postcodes.
 // ---------------------------------------------------------------------------
 
 export interface EnabledRegion {
@@ -106,10 +105,8 @@ export interface EnabledRegion {
 /**
  * Get all enabled product regions with their configured postcodes.
  *
- * Mirrors PHP:
- *   $group = $categories->getGroupByHandle('productRegions');
- *   $regions = $craftHelper->findCategories($group, 'enabled');
- *   foreach: $postcodes = array_column($region->roam_categories_regionPostcodes, 'col2');
+ * Collects enabled product regions from the productRegions category group,
+ * along with each region's configured postcodes from the table field.
  */
 export async function getEnabledRegionPostcodes(
   db: DatabaseConnection
@@ -184,10 +181,7 @@ export async function getEnabledRegionPostcodes(
 /**
  * Check if a postcode matches any enabled product region.
  *
- * Mirrors CraftHelper::hasFoundProductRegionsByPostcode($postcode):
- *   CategoryElement::find()->groupId($group->id)->status('enabled')->search($postcode)
- *
- * We replicate this by checking against the postcodes collected above.
+ * Check if a postcode appears in any enabled region's postcode list.
  * Returns the matching regions (if any).
  */
 export function matchPostcodeToRegions(
@@ -253,7 +247,8 @@ export async function isCustomProduct(
 
 // ---------------------------------------------------------------------------
 // ATDW category -> productCategories mapping
-// Mirrors AtdwProductFormatter::getProductCategory() and CategoriesFormatter
+// Data collection: resolve atdwCategories entries and their linked
+// productCategories for both top-level types and vertical classifications.
 // ---------------------------------------------------------------------------
 
 export interface CategoryMapping {
@@ -266,12 +261,8 @@ export interface CategoryMapping {
 /**
  * Resolve the ATDW category -> productCategories mapping.
  *
- * Mirrors AtdwProductFormatter::getProductCategory($type):
- *   1. Find atdwCategories category by slug (lowercase ATDW type)
- *   2. Find productCategories related to it (craft_relations, level 1)
- *
- * Also checks what categories the rawData already contains
- * (roam_products_categories field from the API response).
+ * Resolve the top-level ATDW type (e.g. "ACCOMM") to its productCategories
+ * via the atdwCategories category group and craft_relations.
  */
 export async function resolveAtdwCategoryMapping(
   db: DatabaseConnection,
@@ -331,6 +322,77 @@ export async function resolveAtdwCategoryMapping(
 }
 
 /**
+ * Check which vertical classifications have atdwCategories mappings.
+ *
+ * The PHP import (ProductClassificationsFormatter) maps each vertical
+ * classification ID to an atdwCategories entry, then finds related
+ * productCategories. If a classification has no mapping, it's silently
+ * skipped and the product falls back to the parent-level category only.
+ */
+export async function resolveVerticalClassificationMappings(
+  db: DatabaseConnection,
+  classificationIds: string[]
+): Promise<{
+  mapped: { classificationId: string; atdwSlug: string; atdwTitle: string; productCategories: string[] }[];
+  unmapped: string[];
+}> {
+  if (classificationIds.length === 0) {
+    return { mapped: [], unmapped: [] };
+  }
+
+  const mapped: { classificationId: string; atdwSlug: string; atdwTitle: string; productCategories: string[] }[] = [];
+  const unmapped: string[] = [];
+
+  for (const classId of classificationIds) {
+    const slug = classId.toLowerCase();
+
+    // Look up atdwCategories entry for this classification
+    const atdwRows = await db.query<{ id: number; slug: string; title: string }>(
+      `SELECT cat.id, es.slug, c.title
+       FROM craft_categories cat
+       JOIN craft_categorygroups cg ON cg.id = cat.groupId AND cg.handle = 'atdwCategories'
+       JOIN craft_elements e ON e.id = cat.id AND e.dateDeleted IS NULL
+       JOIN craft_elements_sites es ON es.elementId = cat.id
+       JOIN craft_content c ON c.elementId = cat.id
+       WHERE es.slug = ?
+       LIMIT 1`,
+      [slug]
+    );
+
+    if (atdwRows.length === 0) {
+      unmapped.push(classId);
+      continue;
+    }
+
+    const atdwCat = atdwRows[0];
+
+    // Find related productCategories
+    const pcRows = await db.query<{ title: string }>(
+      `SELECT pc_c.title
+       FROM craft_relations r
+       JOIN craft_categories pc_cat ON pc_cat.id = r.sourceId
+       JOIN craft_categorygroups pc_cg ON pc_cg.id = pc_cat.groupId AND pc_cg.handle = 'productCategories'
+       JOIN craft_content pc_c ON pc_c.elementId = pc_cat.id
+       WHERE r.targetId = ?`,
+      [atdwCat.id]
+    );
+
+    if (pcRows.length === 0) {
+      unmapped.push(classId);
+    } else {
+      mapped.push({
+        classificationId: classId,
+        atdwSlug: atdwCat.slug,
+        atdwTitle: atdwCat.title,
+        productCategories: pcRows.map((r) => r.title),
+      });
+    }
+  }
+
+  return { mapped, unmapped };
+}
+
+/**
  * Get the actual categories assigned to a product entry.
  */
 export async function getEntryCategories(
@@ -363,8 +425,8 @@ export async function getEntryCategories(
 }
 
 // ---------------------------------------------------------------------------
-// ImportService tracing
-// Mirrors CP\ImportService::import() -> createProduct() / updateProduct()
+// Product entry state
+// Data collection: what the Craft entry looks like after import.
 // ---------------------------------------------------------------------------
 
 /**

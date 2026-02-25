@@ -15,6 +15,7 @@ import {
   isCustomProduct,
   getProductEntryState,
   resolveAtdwCategoryMapping,
+  resolveVerticalClassificationMappings,
   getEntryCategories,
 } from "../queries/atdw";
 
@@ -107,6 +108,11 @@ export async function traceAtdwImport(
   const productPostcode = firstLocation?.postcode?.trim() ?? null;
   const productCity = firstLocation?.city ?? null;
 
+  // Extract vertical classifications (e.g. VANCAMP for "Caravan, Camping and Holiday Parks")
+  const verticalClassifications = Array.isArray(raw?.verticalClassifications)
+    ? (raw.verticalClassifications as { productTypeId?: string; productTypeDescription?: string }[])
+    : [];
+
   trace.push({
     step: "atdw_lookup",
     description:
@@ -114,7 +120,10 @@ export async function traceAtdwImport(
       `Organisation: ${organisation ?? "unknown"}. ` +
       `Category: ${category}. ` +
       `Status: ${record.status}. ` +
-      `Location: ${productCity ?? "unknown"} (postcode: ${productPostcode ?? "none"}).`,
+      `Location: ${productCity ?? "unknown"} (postcode: ${productPostcode ?? "none"}).` +
+      (verticalClassifications.length > 0
+        ? ` Sub-types: ${verticalClassifications.map((vc) => `${vc.productTypeDescription ?? vc.productTypeId} (${vc.productTypeId})`).join(", ")}.`
+        : ""),
     count: 1,
     productIds: record.entryId ? [record.entryId] : [],
     targetPresent: true,
@@ -127,6 +136,10 @@ export async function traceAtdwImport(
       hasEntry: record.entryId != null,
       parentId: record.parentId,
       dateUpdated: record.dateUpdated,
+      verticalClassifications: verticalClassifications.map((vc) => ({
+        id: vc.productTypeId,
+        description: vc.productTypeDescription,
+      })),
     },
   });
 
@@ -221,43 +234,99 @@ export async function traceAtdwImport(
 
   // -------------------------------------------------------------------------
   // Step 5: atdw_category_mapping - Category chain data
+  //
+  // Two category paths in the import:
+  //   A. Top-level type (e.g. ACCOMM -> "Stay")
+  //   B. Vertical classifications (e.g. VANCAMP -> may or may not have mapping)
+  // If a vertical classification has no atdwCategories mapping, only the
+  // parent type category gets assigned. This is the most common reason
+  // for "only Stay and no subcategories."
   // -------------------------------------------------------------------------
-  const { atdwCategory, mappedProductCategories } =
-    await resolveAtdwCategoryMapping(db, category);
+  const [
+    { atdwCategory, mappedProductCategories },
+    verticalMappings,
+    entryCategories,
+  ] = await Promise.all([
+    resolveAtdwCategoryMapping(db, category),
+    verticalClassifications.length > 0
+      ? resolveVerticalClassificationMappings(
+          db,
+          verticalClassifications.map((vc) => vc.productTypeId ?? "").filter(Boolean)
+        )
+      : Promise.resolve({ mapped: [], unmapped: [] }),
+    hasEntry && record.entryId
+      ? getEntryCategories(db, record.entryId)
+      : Promise.resolve([]),
+  ]);
 
   const rawCategories = Array.isArray(raw?.roam_products_categories)
     ? (raw.roam_products_categories as { slug?: string; group?: string }[])
     : [];
 
-  const entryCategories = hasEntry && record.entryId
-    ? await getEntryCategories(db, record.entryId)
-    : [];
+  // Build a clear description of the full category chain
+  const categoryDescParts: string[] = [];
+
+  // A. Top-level type mapping
+  if (atdwCategory) {
+    categoryDescParts.push(
+      `Top-level ATDW type "${category}" maps to "${atdwCategory.title}"` +
+      (mappedProductCategories.length > 0
+        ? ` -> product categories: ${mappedProductCategories.map((m) => m.productCategoryTitle).join(", ")}.`
+        : ` but has no linked product categories.`)
+    );
+  } else {
+    categoryDescParts.push(`No atdwCategories entry found for top-level type "${category}".`);
+  }
+
+  // B. Vertical classification mappings
+  if (verticalClassifications.length > 0) {
+    if (verticalMappings.mapped.length > 0) {
+      for (const m of verticalMappings.mapped) {
+        categoryDescParts.push(
+          `Sub-type "${m.classificationId}" (${m.atdwTitle}) has category mapping -> ${m.productCategories.join(", ")}.`
+        );
+      }
+    }
+    if (verticalMappings.unmapped.length > 0) {
+      const unmappedDescs = verticalMappings.unmapped.map((id) => {
+        const vc = verticalClassifications.find((v) => v.productTypeId === id);
+        return `"${id}" (${vc?.productTypeDescription ?? "unknown"})`;
+      });
+      categoryDescParts.push(
+        `Sub-type(s) ${unmappedDescs.join(", ")} have NO category mapping in the CMS - ` +
+        `these won't produce subcategories on the website.`
+      );
+    }
+  }
+
+  // C. What the entry actually has
+  if (entryCategories.length > 0) {
+    categoryDescParts.push(
+      `Website entry currently has ${entryCategories.length} categories: ${entryCategories.map((c) => c.title).join(", ")}.`
+    );
+  }
 
   trace.push({
     step: "atdw_category_mapping",
-    description:
-      (atdwCategory
-        ? `ATDW type "${category}" maps to "${atdwCategory.title}". ` +
-          (mappedProductCategories.length > 0
-            ? `Linked product categories: ${mappedProductCategories.map((m) => m.productCategoryTitle).join(", ")}.`
-            : "No product categories linked.")
-        : `No atdwCategories entry found for type "${category}".`) +
-      (rawCategories.length > 0
-        ? ` Raw data includes ${rawCategories.length} pre-resolved categories.`
-        : "") +
-      (entryCategories.length > 0
-        ? ` Entry has ${entryCategories.length} categories: ${entryCategories.map((c) => c.title).join(", ")}.`
-        : ""),
-    count: mappedProductCategories.length,
+    description: categoryDescParts.join(" "),
+    count: mappedProductCategories.length + verticalMappings.mapped.length,
     productIds: [],
     targetPresent: mappedProductCategories.length > 0 || entryCategories.length > 0,
     details: {
       atdwType: category,
       atdwCategory: atdwCategory ? { slug: atdwCategory.slug, title: atdwCategory.title } : null,
-      mappedTo: mappedProductCategories.map((m) => ({
+      topLevelMappedTo: mappedProductCategories.map((m) => ({
         slug: m.productCategorySlug,
         title: m.productCategoryTitle,
       })),
+      verticalClassifications: verticalClassifications.map((vc) => ({
+        id: vc.productTypeId,
+        description: vc.productTypeDescription,
+      })),
+      verticalMappings: {
+        mapped: verticalMappings.mapped,
+        unmapped: verticalMappings.unmapped,
+      },
       rawDataCategories: rawCategories,
       entryCategories: entryCategories.map((c) => ({
         slug: c.slug,
