@@ -14,6 +14,8 @@ import {
   matchPostcodeToRegions,
   isCustomProduct,
   getProductEntryState,
+  resolveAtdwCategoryMapping,
+  getEntryCategories,
 } from "../queries/atdw";
 // EnabledRegion type used implicitly via getEnabledRegionPostcodes return type
 
@@ -423,7 +425,92 @@ export async function traceAtdwImport(
   });
 
   // -------------------------------------------------------------------------
-  // Step 8: atdw_entry_state - What ImportService did (or would do)
+  // Step 8: atdw_category_mapping - How ATDW categories map to product categories
+  // Mirrors AtdwProductFormatter::getProductCategory() + CategoriesFormatter
+  //
+  // Chain: ATDW rawData.category (e.g. "ATTRACTION")
+  //   -> atdwCategories craft category (slug: "attraction")
+  //     -> craft_relations -> productCategories (e.g. "See & Do")
+  //       -> entry.roam_products_categories
+  //
+  // Plus: rawData.roam_products_categories may contain pre-resolved mappings
+  // from the ATDW API response (e.g. [{slug: "outdoor-activities", group: "productCategories"}])
+  // -------------------------------------------------------------------------
+  const { atdwCategory, mappedProductCategories } =
+    await resolveAtdwCategoryMapping(db, category);
+
+  // Categories from the rawData itself (pre-resolved by ATDW provider)
+  const rawCategories = Array.isArray(raw?.roam_products_categories)
+    ? (raw.roam_products_categories as { slug?: string; group?: string }[])
+    : [];
+
+  // Categories actually on the entry (if it exists)
+  const entryCategories = hasEntry && record.entryId
+    ? await getEntryCategories(db, record.entryId)
+    : [];
+
+  if (atdwCategory) {
+    const mappingDesc = mappedProductCategories.length > 0
+      ? `ATDW type "${category}" maps to category "${atdwCategory.title}", ` +
+        `which is linked to ${mappedProductCategories.length} product categor${mappedProductCategories.length === 1 ? "y" : "ies"}: ` +
+        mappedProductCategories.map((m) => `"${m.productCategoryTitle}"`).join(", ") + "."
+      : `ATDW type "${category}" maps to category "${atdwCategory.title}", but no productCategories are linked to it.`;
+
+    const rawDesc = rawCategories.length > 0
+      ? ` Raw data also includes ${rawCategories.length} pre-resolved categor${rawCategories.length === 1 ? "y" : "ies"}: ` +
+        rawCategories.map((c) => c.slug).join(", ") + "."
+      : "";
+
+    const entryDesc = entryCategories.length > 0
+      ? ` The website entry currently has ${entryCategories.length} categor${entryCategories.length === 1 ? "y" : "ies"}: ` +
+        entryCategories.map((c) => `"${c.title}"`).join(", ") + "."
+      : hasEntry
+        ? " The website entry has no categories assigned."
+        : "";
+
+    trace.push({
+      step: "atdw_category_mapping",
+      description: mappingDesc + rawDesc + entryDesc,
+      count: mappedProductCategories.length,
+      productIds: [],
+      targetPresent: mappedProductCategories.length > 0,
+      details: {
+        atdwType: category,
+        atdwCategorySlug: atdwCategory.slug,
+        atdwCategoryTitle: atdwCategory.title,
+        mappedTo: mappedProductCategories.map((m) => ({
+          slug: m.productCategorySlug,
+          title: m.productCategoryTitle,
+        })),
+        rawDataCategories: rawCategories,
+        entryCategories: entryCategories.map((c) => ({
+          slug: c.slug,
+          title: c.title,
+          group: c.group,
+        })),
+      },
+    });
+  } else {
+    trace.push({
+      step: "atdw_category_mapping",
+      description:
+        `No atdwCategories entry found for type "${category}". ` +
+        `The formatter will use the "general" entry type as fallback.` +
+        (rawCategories.length > 0
+          ? ` Raw data does include ${rawCategories.length} pre-resolved categories: ${rawCategories.map((c) => c.slug).join(", ")}.`
+          : ""),
+      count: 0,
+      productIds: [],
+      targetPresent: false,
+      details: {
+        atdwType: category,
+        rawDataCategories: rawCategories,
+      },
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Step 9: atdw_entry_state - What ImportService did (or would do)
   // Mirrors CP\ImportService::import():
   //   if ($record->isActive() || $entry): $import = true
   //   if ($entry): updateProduct() else: createProduct()

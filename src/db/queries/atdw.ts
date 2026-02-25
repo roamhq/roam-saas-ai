@@ -252,6 +252,117 @@ export async function isCustomProduct(
 }
 
 // ---------------------------------------------------------------------------
+// ATDW category -> productCategories mapping
+// Mirrors AtdwProductFormatter::getProductCategory() and CategoriesFormatter
+// ---------------------------------------------------------------------------
+
+export interface CategoryMapping {
+  atdwSlug: string;
+  atdwTitle: string;
+  productCategorySlug: string;
+  productCategoryTitle: string;
+}
+
+/**
+ * Resolve the ATDW category -> productCategories mapping.
+ *
+ * Mirrors AtdwProductFormatter::getProductCategory($type):
+ *   1. Find atdwCategories category by slug (lowercase ATDW type)
+ *   2. Find productCategories related to it (craft_relations, level 1)
+ *
+ * Also checks what categories the rawData already contains
+ * (roam_products_categories field from the API response).
+ */
+export async function resolveAtdwCategoryMapping(
+  db: DatabaseConnection,
+  atdwCategoryType: string
+): Promise<{
+  atdwCategory: { id: number; slug: string; title: string } | null;
+  mappedProductCategories: CategoryMapping[];
+}> {
+  const slug = atdwCategoryType.toLowerCase();
+
+  // 1. Find the atdwCategories entry
+  const atdwRows = await db.query<{
+    id: number;
+    slug: string;
+    title: string;
+  }>(
+    `SELECT cat.id, es.slug, c.title
+     FROM craft_categories cat
+     JOIN craft_categorygroups cg ON cg.id = cat.groupId AND cg.handle = 'atdwCategories'
+     JOIN craft_elements e ON e.id = cat.id AND e.dateDeleted IS NULL
+     JOIN craft_elements_sites es ON es.elementId = cat.id
+     JOIN craft_content c ON c.elementId = cat.id
+     WHERE es.slug = ?
+     LIMIT 1`,
+    [slug]
+  );
+
+  if (atdwRows.length === 0) {
+    return { atdwCategory: null, mappedProductCategories: [] };
+  }
+
+  const atdwCategory = atdwRows[0];
+
+  // 2. Find productCategories related to this atdwCategory
+  const mappingRows = await db.query<{
+    pcSlug: string;
+    pcTitle: string;
+  }>(
+    `SELECT pc_es.slug AS pcSlug, pc_c.title AS pcTitle
+     FROM craft_relations r
+     JOIN craft_categories pc_cat ON pc_cat.id = r.sourceId
+     JOIN craft_categorygroups pc_cg ON pc_cg.id = pc_cat.groupId AND pc_cg.handle = 'productCategories'
+     JOIN craft_elements_sites pc_es ON pc_es.elementId = pc_cat.id
+     JOIN craft_content pc_c ON pc_c.elementId = pc_cat.id
+     WHERE r.targetId = ?`,
+    [atdwCategory.id]
+  );
+
+  const mappedProductCategories: CategoryMapping[] = mappingRows.map((r) => ({
+    atdwSlug: atdwCategory.slug,
+    atdwTitle: atdwCategory.title,
+    productCategorySlug: r.pcSlug,
+    productCategoryTitle: r.pcTitle,
+  }));
+
+  return { atdwCategory, mappedProductCategories };
+}
+
+/**
+ * Get the actual categories assigned to a product entry.
+ */
+export async function getEntryCategories(
+  db: DatabaseConnection,
+  entryId: number
+): Promise<{ id: number; slug: string; title: string; group: string }[]> {
+  const rows = await db.query<{
+    id: number;
+    slug: string;
+    title: string;
+    groupHandle: string;
+  }>(
+    `SELECT cat.id, es.slug, c.title, cg.handle AS groupHandle
+     FROM craft_relations r
+     JOIN craft_fields f ON f.id = r.fieldId AND f.handle = 'roam_products_categories'
+     JOIN craft_categories cat ON cat.id = r.targetId
+     JOIN craft_categorygroups cg ON cg.id = cat.groupId
+     JOIN craft_elements_sites es ON es.elementId = cat.id
+     JOIN craft_content c ON c.elementId = cat.id
+     WHERE r.sourceId = ?`,
+    [entryId]
+  );
+
+  return rows.map((r) => ({
+    id: r.id,
+    slug: r.slug,
+    title: r.title,
+    group: r.groupHandle,
+  }));
+}
+
+// ---------------------------------------------------------------------------
 // ImportService tracing
 // Mirrors CP\ImportService::import() -> createProduct() / updateProduct()
 // ---------------------------------------------------------------------------

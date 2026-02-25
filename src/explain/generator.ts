@@ -254,6 +254,7 @@ const stepLabels: Record<TraceStepName, string> = {
   atdw_fetch_eligibility: "Fetch eligibility",
   atdw_data_delta: "Data change detection",
   atdw_import_resolution: "Import decision",
+  atdw_category_mapping: "Category mapping",
   atdw_entry_state: "Product entry processing",
   atdw_entry_link: "Website listing",
 };

@@ -84,7 +84,8 @@ export type TraceStepName =
   | "atdw_fetch_eligibility"
   | "atdw_data_delta"
   | "atdw_import_resolution"
-  // ImportService - maps ATDW record to Craft product entry
+  // Formatter + ImportService - maps ATDW record to Craft product entry
+  | "atdw_category_mapping"
   | "atdw_entry_state"
   | "atdw_entry_link";
 
