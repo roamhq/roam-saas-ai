@@ -56,6 +56,7 @@ export async function generateExplanation(
     const autorag = env.AI.autorag(env.AUTORAG_NAME);
     const response = await autorag.aiSearch({
       query,
+      model: env.AISEARCH_MODEL,
       system_prompt: systemPrompt,
       rewrite_query: true,
       max_num_results: 10,
@@ -112,6 +113,7 @@ export function streamExplanation(
         const autorag = env.AI.autorag(env.AUTORAG_NAME);
         const response = await autorag.aiSearch({
           query,
+          model: env.AISEARCH_MODEL,
           system_prompt: systemPrompt,
           rewrite_query: true,
           max_num_results: 10,

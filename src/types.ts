@@ -10,6 +10,7 @@ export interface Env {
   DB: Hyperdrive;
   DEFAULT_TENANT: string;
   AUTORAG_NAME: string;
+  AISEARCH_MODEL?: string;
   ENVIRONMENT?: string;
 }
 

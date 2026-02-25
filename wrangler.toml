@@ -28,14 +28,15 @@ id = "a7e8d114c7764404addb8360c634abc8"
 
 [vars]
 DEFAULT_TENANT = "vicheartland"
-AUTORAG_NAME = "roam-ai"  # Update to match your AI Search instance name in the dashboard
+AUTORAG_NAME = "roam-ai"
+AISEARCH_MODEL = "google-ai-studio/gemini-2.5-flash"  # aiSearch generation model
 
 # -------------------------------------------------------------------
 # Staging
 # -------------------------------------------------------------------
 [env.staging]
 name = "roam-saas-ai-staging"
-vars = { ENVIRONMENT = "staging", DEFAULT_TENANT = "vicheartland", AUTORAG_NAME = "roam-ai" }
+vars = { ENVIRONMENT = "staging", DEFAULT_TENANT = "vicheartland", AUTORAG_NAME = "roam-ai", AISEARCH_MODEL = "google-ai-studio/gemini-2.5-flash" }
 
 [env.staging.ai]
 binding = "AI"
@@ -65,7 +66,7 @@ region = "aws:ap-southeast-2"
 [env.production]
 name = "roam-saas-ai"
 minify = true
-vars = { ENVIRONMENT = "production", DEFAULT_TENANT = "vicheartland", AUTORAG_NAME = "roam-ai" }
+vars = { ENVIRONMENT = "production", DEFAULT_TENANT = "vicheartland", AUTORAG_NAME = "roam-ai", AISEARCH_MODEL = "google-ai-studio/gemini-2.5-flash" }
 
 [env.production.ai]
 binding = "AI"
