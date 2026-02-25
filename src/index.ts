@@ -210,7 +210,7 @@ async function resolveData(
   const componentType = intent.componentType;
 
   // Retrieve code context from AutoRAG (runs in parallel with DB work)
-  const codeContextPromise = retrieveContext(env, intent);
+  const codeContextPromise = retrieveContext(env, intent, tenant);
 
   // Resolve entities via DB
   t0 = Date.now();

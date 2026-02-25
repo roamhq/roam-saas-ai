@@ -1,10 +1,10 @@
 name: Push Theme Knowledge Base
 
 # Reusable workflow - called from each theme repo's deployment.yml
-# Converts all theme templates to Markdown and pushes to R2 for AI Search indexing.
-#
-# AI Search doesn't support .twig files directly, so we wrap each source file
-# in a Markdown code block with metadata (file path, theme, template context).
+# Converts theme templates and JS components to Markdown with natural-language
+# preambles, then pushes to R2 for AI Search indexing. The preambles give the
+# embedding model descriptive text to match against natural-language questions
+# rather than relying on raw code syntax alone.
 #
 # Usage in theme repo:
 #   jobs:
@@ -57,7 +57,7 @@ jobs:
               echo "It is located at ${context} in the theme template tree."
               echo ""
               echo "**Theme**: ${THEME}"
-              echo "**Source**: ${src}"
+              echo "**Source**: ${rel_path}"
               echo "**Context**: ${context}"
               echo ""
               echo '```twig'
@@ -68,8 +68,37 @@ jobs:
             echo "  Converted: $src"
           done
 
-          # JS and HTML files -> copy as-is (AutoRAG indexes these natively)
-          find app/templates -type f \( -name "*.js" -o -name "*.html" \) | while read src; do
+          # JS files -> convert to .md (Vue components need natural-language preamble for embedding quality)
+          find app/templates -type f -name "*.js" | while read src; do
+            rel_path=$(echo "$src" | sed 's|app/templates/||')
+            context=$(dirname "$rel_path" | tr '/' ' > ')
+            filename=$(basename "$src")
+            name="${filename%.*}"
+
+            out_dir="${OUTDIR}/themes/${THEME}/$(dirname "$rel_path")"
+            out_file="${out_dir}/${filename}.md"
+            mkdir -p "$out_dir"
+
+            {
+              echo "# ${name} - ${THEME} theme"
+              echo ""
+              echo "This JavaScript/Vue component is part of the ${THEME} tourism website on the Roam platform."
+              echo "It is located at ${context} in the theme template tree."
+              echo ""
+              echo "**Theme**: ${THEME}"
+              echo "**Source**: ${src}"
+              echo "**Context**: ${context}"
+              echo ""
+              echo '```javascript'
+              cat "$src"
+              echo '```'
+            } > "$out_file"
+
+            echo "  Converted: $src"
+          done
+
+          # HTML files -> copy as-is (AI Search converts HTML to Markdown internally)
+          find app/templates -type f -name "*.html" | while read src; do
             rel_path=$(echo "$src" | sed 's|app/templates/||')
             out_dir="${OUTDIR}/themes/${THEME}/$(dirname "$rel_path")"
             mkdir -p "$out_dir"
