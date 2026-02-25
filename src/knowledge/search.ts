@@ -43,9 +43,10 @@ export async function retrieveContext(
     const response: AutoRAGResponse = await autorag.search({
       query,
       rewrite_query: true,
-      max_num_results: 6,
+      max_num_results: 10,
+      reranking: { enabled: true },
       ranking_options: {
-        score_threshold: 0.25,
+        score_threshold: 0.2,
       },
     });
 
