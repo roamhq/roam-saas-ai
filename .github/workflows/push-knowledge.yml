@@ -53,10 +53,12 @@ jobs:
             {
               echo "# ${name} - ${THEME} theme"
               echo ""
+              echo "This Twig template is the ${name} component for the ${THEME} tourism website on the Roam platform."
+              echo "It is located at ${context} in the theme template tree."
+              echo ""
               echo "**Theme**: ${THEME}"
               echo "**Source**: ${src}"
               echo "**Context**: ${context}"
-              echo "**Type**: twig"
               echo ""
               echo '```twig'
               cat "$src"

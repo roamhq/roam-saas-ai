@@ -1,0 +1,66 @@
+name: Push PHP Knowledge Base
+
+# Reusable workflow - called from roamhq/roam deployment.yml
+# Converts PHP source to Markdown with natural-language preambles and pushes to R2
+# for AI Search indexing. Raw PHP produces weak embeddings for natural-language
+# queries; the .md wrapper gives the embedding model descriptive text to match against.
+#
+# Usage in roamhq/roam deployment.yml:
+#   jobs:
+#     push-knowledge:
+#       uses: roamhq/saas-ai/.github/workflows/push-php-knowledge.yml@main
+#       with:
+#         source-path: src/Plugins/Roam/src
+#       secrets: inherit
+
+on:
+  workflow_call:
+    inputs:
+      source-path:
+        description: "Path to PHP source directory (relative to repo root)"
+        required: true
+        type: string
+    secrets:
+      RCLONE_ACCESS_KEY_ID:
+        required: true
+      RCLONE_SECRET_ACCESS_KEY:
+        required: true
+
+env:
+  R2_ENDPOINT: "https://732e7b6d5dd17779e5b2368491e6a05f.r2.cloudflarestorage.com"
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout calling repo (roamhq/roam)
+        uses: actions/checkout@v4
+
+      - name: Checkout conversion script
+        uses: actions/checkout@v4
+        with:
+          repository: roamhq/saas-ai
+          path: _saas-ai
+          sparse-checkout: scripts/php-to-md.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Convert PHP to Markdown
+        run: |
+          chmod +x _saas-ai/scripts/php-to-md.sh
+          _saas-ai/scripts/php-to-md.sh "${{ inputs.source-path }}" _knowledge-base/core
+
+      - name: Push to R2
+        uses: andreiio/rclone-action@v1
+        with:
+          args: >-
+            sync _knowledge-base/
+            s3:roam-ai/
+            --include "core/**"
+        env:
+          RCLONE_CONFIG_S3_TYPE: s3
+          RCLONE_CONFIG_S3_PROVIDER: Cloudflare
+          RCLONE_CONFIG_S3_ACCESS_KEY_ID: ${{ secrets.RCLONE_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_S3_SECRET_ACCESS_KEY: ${{ secrets.RCLONE_SECRET_ACCESS_KEY }}
+          RCLONE_CONFIG_S3_ENDPOINT: ${{ env.R2_ENDPOINT }}
+          RCLONE_CONFIG_S3_ACL: private
