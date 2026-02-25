@@ -39,14 +39,11 @@ jobs:
           mkdir -p "$OUTDIR"
           THEME="${{ inputs.theme }}"
 
-          # Index ALL twig, html, and js files under app/templates
-          find app/templates -type f \( -name "*.twig" -o -name "*.html" -o -name "*.js" \) | while read src; do
-            # Derive context from path: app/templates/components/Products/... -> components > Products
-            # app/templates/objects/product/details.twig -> objects > product
+          # Twig files -> convert to .md (AutoRAG can't index .twig directly)
+          find app/templates -type f -name "*.twig" | while read src; do
             rel_path=$(echo "$src" | sed 's|app/templates/||')
             context=$(dirname "$rel_path" | tr '/' ' > ')
             filename=$(basename "$src")
-            ext="${filename##*.}"
             name="${filename%.*}"
 
             out_dir="${OUTDIR}/themes/${THEME}/$(dirname "$rel_path")"
@@ -59,9 +56,9 @@ jobs:
               echo "**Theme**: ${THEME}"
               echo "**Source**: ${src}"
               echo "**Context**: ${context}"
-              echo "**Type**: ${ext}"
+              echo "**Type**: twig"
               echo ""
-              echo '```'"${ext}"
+              echo '```twig'
               cat "$src"
               echo '```'
             } > "$out_file"
@@ -69,7 +66,16 @@ jobs:
             echo "  Converted: $src"
           done
 
-          echo "Total files: $(find "$OUTDIR" -name '*.md' | wc -l)"
+          # JS and HTML files -> copy as-is (AutoRAG indexes these natively)
+          find app/templates -type f \( -name "*.js" -o -name "*.html" \) | while read src; do
+            rel_path=$(echo "$src" | sed 's|app/templates/||')
+            out_dir="${OUTDIR}/themes/${THEME}/$(dirname "$rel_path")"
+            mkdir -p "$out_dir"
+            cp "$src" "$out_dir/"
+            echo "  Copied: $src"
+          done
+
+          echo "Total files: $(find "$OUTDIR" -type f | wc -l)"
 
       - name: Push to R2
         uses: andreiio/rclone-action@v1
