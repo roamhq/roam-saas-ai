@@ -8,13 +8,30 @@ const TEXT_MODEL = "@cf/meta/llama-3.1-8b-instruct-fast" as any;
 /**
  * Use Workers AI to extract structured intent from a natural language question.
  *
- * Extracts: page URI/name, component type, product names, question type.
+ * Pre-processing: deterministic signals (admin product URLs) are detected
+ * before the LLM call. The LLM then handles the natural-language parts
+ * (question type, product names mentioned in text).
  */
 export async function parseIntent(
   question: string,
   hintPageUri: string | null | undefined,
   env: Env
 ): Promise<ParsedIntent> {
+  // ---------------------------------------------------------------------------
+  // Pre-processing: detect admin product URLs
+  // /admin/entries/products/{entryId}-{slug} -> ATDW domain with product name
+  // ---------------------------------------------------------------------------
+  const adminProductMatch = hintPageUri?.match(
+    /^\/admin\/entries\/products\/(\d+)-(.+)$/
+  );
+  const adminProductHint = adminProductMatch
+    ? {
+        entryId: parseInt(adminProductMatch[1], 10),
+        slug: adminProductMatch[2],
+        name: adminProductMatch[2].replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
+      }
+    : null;
+
   const systemPrompt = `You are an intent parser for a CMS explainability bot. Given a user question about why certain content appears on their website, extract structured information.
 
 The website is a tourism destination marketing site built on Craft CMS. There are two domains:
@@ -43,9 +60,11 @@ Question types:
 - "why_order": asking about the ordering/sorting of results
 - "general": general question about how things work`;
 
-  const userPrompt = hintPageUri
-    ? `Page context: ${hintPageUri}\n\nQuestion: ${question}`
-    : `Question: ${question}`;
+  const userPrompt = adminProductHint
+    ? `Context: User is viewing ATDW product entry "${adminProductHint.name}" (entry ${adminProductHint.entryId}) in the admin panel.\n\nQuestion: ${question}`
+    : hintPageUri
+      ? `Page context: ${hintPageUri}\n\nQuestion: ${question}`
+      : `Question: ${question}`;
 
   try {
     const result = await env.AI.run(TEXT_MODEL, {
@@ -72,14 +91,23 @@ Question types:
 
     const parsed = JSON.parse(jsonMatch[0]);
 
+    // LLM-parsed product names, merged with admin URL hint
+    const productNames = Array.isArray(parsed.productNames)
+      ? parsed.productNames
+      : [];
+    if (adminProductHint && !productNames.some(
+      (n: string) => n.toLowerCase() === adminProductHint.name.toLowerCase()
+    )) {
+      productNames.unshift(adminProductHint.name);
+    }
+
     return {
-      domain: validateDomain(parsed.domain),
+      // Admin product URL is a deterministic signal - override LLM domain
+      domain: adminProductHint ? "atdw_import" : validateDomain(parsed.domain),
       pageUri: parsed.pageUri ?? hintPageUri ?? null,
       pageName: parsed.pageName ?? null,
       componentType: (parsed.componentType ?? "products").toLowerCase(),
-      productNames: Array.isArray(parsed.productNames)
-        ? parsed.productNames
-        : [],
+      productNames,
       questionType: validateQuestionType(parsed.questionType),
       rawQuestion: question,
       atdwProductId: typeof parsed.atdwProductId === "string" ? parsed.atdwProductId : undefined,
@@ -94,7 +122,22 @@ function fallbackIntent(
   question: string,
   hintPageUri: string | null | undefined
 ): ParsedIntent {
-  // Simple keyword heuristic for ATDW fallback
+  // Deterministic: admin product URL
+  const adminMatch = hintPageUri?.match(/^\/admin\/entries\/products\/(\d+)-(.+)$/);
+  if (adminMatch) {
+    const name = adminMatch[2].replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+    return {
+      domain: "atdw_import",
+      pageUri: hintPageUri ?? null,
+      pageName: null,
+      componentType: "products",
+      productNames: [name],
+      questionType: "general",
+      rawQuestion: question,
+    };
+  }
+
+  // Keyword heuristic for ATDW
   const lowerQ = question.toLowerCase();
   const isAtdw = /\batdw\b|\batlas\b|\bimport(?:ed)?\b.*\bproduct\b|\bproduct\b.*\bimport/.test(lowerQ);
 
