@@ -9,10 +9,10 @@ import type {
   TraceStepName,
 } from "../types";
 
-// Workers AI model name - cast required because @cloudflare/workers-types
+// Workers AI models - cast required because @cloudflare/workers-types
 // doesn't include all available model IDs in its union type
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const TEXT_MODEL = "@cf/meta/llama-3.1-8b-instruct-fast" as any;
+const TEXT_MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast" as any;
 
 /**
  * Generate a plain-language explanation using Workers AI (non-streaming).
