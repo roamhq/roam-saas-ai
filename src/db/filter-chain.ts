@@ -15,18 +15,22 @@ import { findProductsByAndRelations } from "./queries/relations";
 import { getProductTitles } from "./queries/products";
 
 /**
- * Trace the Products component filter chain step-by-step.
+ * Products Component Data Collector
  *
- * Mirrors the logic in components/Products/default.twig:
- *   1. Resolve categories (strip descendants)
- *   2. Resolve regions (strip descendants)
- *   3. Region -> product resolution (postcodes + relations)
- *   4. Category+Tier AND relation query
- *   5. Scope to region products or all products
- *   6. Merge with explicit products
- *   7. Apply excludes
- *   8. Sort
- *   9. Slice to limit
+ * Collects structured facts about what a Products component displays
+ * and why. Each step queries the DB for actual data - AutoRAG retrieves
+ * the relevant Twig template source for the LLM to interpret.
+ *
+ * Data collection steps:
+ *   1. Category resolution (selected categories, ancestor dedup)
+ *   2. Region resolution (selected regions, ancestor dedup)
+ *   3. Region products (by postcode match + direct relation)
+ *   4. Taxonomy resolution (if configured)
+ *   5. Relation-matched products (categories + tiers + taxonomy)
+ *   6. Explicitly selected products
+ *   7. Excluded products
+ *   8. Sort setting
+ *   9. Display limit
  */
 export async function traceProductsFilterChain(
   db: DatabaseConnection,
@@ -81,7 +85,8 @@ export async function traceProductsFilterChain(
   };
 
   // ---------------------------------------------------------------------------
-  // Step 1: Resolve categories (strip descendants)
+  // Step 1: Category data - which categories are selected?
+  // Ancestor dedup: if both parent + child selected, keep child only (SQL)
   // ---------------------------------------------------------------------------
   const categoryIds = categoryRels.map((c) => c.id);
   const fixedCategoryIds = await resolveFixedCategories(db, categoryIds);
@@ -102,7 +107,8 @@ export async function traceProductsFilterChain(
   });
 
   // ---------------------------------------------------------------------------
-  // Step 2: Resolve regions (strip descendants)
+  // Step 2: Region data - which regions are selected?
+  // Same ancestor dedup as categories (SQL)
   // ---------------------------------------------------------------------------
   const regionIds = regionRels.map((r) => r.id);
   const fixedRegionIds = await resolveFixedCategories(db, regionIds);
@@ -123,7 +129,8 @@ export async function traceProductsFilterChain(
   });
 
   // ---------------------------------------------------------------------------
-  // Step 3: Region -> product resolution
+  // Step 3: Region products - which products are in the selected regions?
+  // Two data sources: postcode match (search index) + direct relation
   // ---------------------------------------------------------------------------
   let productsInRegionIds: number[] = [];
 
@@ -170,7 +177,7 @@ export async function traceProductsFilterChain(
   }
 
   // ---------------------------------------------------------------------------
-  // Step 3b: Resolve taxonomy (strip ancestors) - swanvalley and others
+  // Step 3b: Taxonomy data - additional taxonomy terms (if configured)
   // ---------------------------------------------------------------------------
   const taxonomyIds = taxonomyRels.map((t) => t.id);
   const fixedTaxonomyIds = await resolveFixedCategories(db, taxonomyIds);
@@ -191,7 +198,12 @@ export async function traceProductsFilterChain(
   }
 
   // ---------------------------------------------------------------------------
-  // Step 4: Category + Tier + Taxonomy AND relation query
+  // Step 4-5: Collect products matching active filter dimensions
+  //
+  // Each dimension (categories, tiers, taxonomy, regions) is queried
+  // independently. The data shows what matches each dimension and the
+  // overlap between them. AutoRAG retrieves the Twig template that
+  // determines how these dimensions combine in practice.
   // ---------------------------------------------------------------------------
   const relationSets: { fieldName: string; ids: number[] }[] = [];
   if (fixedCategoryIds.length > 0) {
@@ -207,48 +219,51 @@ export async function traceProductsFilterChain(
 
   const hasRelationFilter = relationSets.length > 0;
 
-  // ---------------------------------------------------------------------------
-  // Step 5: Main query - scope to region products or all products
-  // ---------------------------------------------------------------------------
+  // Collect products matching category/tier/taxonomy relations
+  const relationMatchedProducts = hasRelationFilter
+    ? await findProductsByAndRelations(db, schema, relationSets)
+    : [];
+
+  // Build the combined result set based on which dimensions are active
+  const hasRegionProducts = productsInRegionIds.length > 0;
   let queryResults: number[];
 
-  if (productsInRegionIds.length > 0) {
-    // Scoped to region products
-    if (hasRelationFilter) {
-      // Intersect: region products AND (categories AND tiers)
-      const relatedProducts = await findProductsByAndRelations(
-        db,
-        schema,
-        relationSets
-      );
-      queryResults = productsInRegionIds.filter((id) =>
-        relatedProducts.includes(id)
-      );
-    } else {
-      queryResults = productsInRegionIds;
-    }
+  if (hasRegionProducts && hasRelationFilter) {
+    // Both dimensions active - products appearing in both sets
+    const relationSet = new Set(relationMatchedProducts);
+    queryResults = productsInRegionIds.filter((id) => relationSet.has(id));
+  } else if (hasRegionProducts) {
+    queryResults = productsInRegionIds;
   } else if (hasRelationFilter) {
-    // No regions, but has category/tier filter - query all products
-    queryResults = await findProductsByAndRelations(db, schema, relationSets);
+    queryResults = relationMatchedProducts;
   } else {
-    // No filters at all - would return all products (but template uses explicit only)
     queryResults = [];
   }
 
+  // Report all collected data: individual dimensions + combined
+  const activeFilters = relationSets.map((s) => s.fieldName);
+  if (hasRegionProducts) activeFilters.unshift("regions");
+
   trace.push({
     step: "main_query",
-    description: hasRelationFilter
-      ? `Applied ${relationSets.map((s) => s.fieldName).join(" AND ")} filter${productsInRegionIds.length > 0 ? " within region products" : ""} - ${queryResults.length} products match`
-      : productsInRegionIds.length > 0
-        ? `Using ${productsInRegionIds.length} region-matched products (no category/tier filter)`
-        : "No region, category, or tier filters - using explicit products only",
+    description: activeFilters.length > 0
+      ? `${queryResults.length} products match active filters (${activeFilters.join(" + ")})`
+      : "No filters active - using explicit products only",
     count: queryResults.length,
     productIds: queryResults,
     targetPresent: checkTarget(queryResults),
+    details: {
+      activeFilters,
+      ...(hasRelationFilter && hasRegionProducts ? {
+        relationMatches: relationMatchedProducts.length,
+        regionMatches: productsInRegionIds.length,
+        overlap: queryResults.length,
+      } : {}),
+    },
   });
 
   // ---------------------------------------------------------------------------
-  // Step 6: Merge with explicit products
+  // Step 6: Explicit products - hand-picked by the site manager
   // ---------------------------------------------------------------------------
   const explicitIds = explicitProducts.map((p) => p.id);
   let merged: number[];
@@ -276,7 +291,7 @@ export async function traceProductsFilterChain(
   });
 
   // ---------------------------------------------------------------------------
-  // Step 7: Apply excludes
+  // Step 7: Excluded products - removed from results
   // ---------------------------------------------------------------------------
   const excludeIds = new Set(excludeProducts.map((p) => p.id));
   const afterExcludes =
@@ -299,7 +314,7 @@ export async function traceProductsFilterChain(
   });
 
   // ---------------------------------------------------------------------------
-  // Step 8: Sort (we can indicate the sort method but not execute shuffle)
+  // Step 8: Sort order setting
   // ---------------------------------------------------------------------------
   let sorted = [...afterExcludes];
   let sortDescription: string;
@@ -330,7 +345,7 @@ export async function traceProductsFilterChain(
   });
 
   // ---------------------------------------------------------------------------
-  // Step 9: Slice to limit
+  // Step 9: Display limit
   // ---------------------------------------------------------------------------
   const final = sorted.slice(0, config.limit);
 

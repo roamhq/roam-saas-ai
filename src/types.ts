@@ -76,15 +76,11 @@ export type TraceStepName =
   | "sort"
   | "limit"
   | "block_config"
-  // ATDW import domain - mirrors ProductService::createRecord() decision tree
+  // ATDW import domain - data collection steps
   | "atdw_lookup"
   | "atdw_region_config"
   | "atdw_postcode_match"
   | "atdw_status_eval"
-  | "atdw_fetch_eligibility"
-  | "atdw_data_delta"
-  | "atdw_import_resolution"
-  // Formatter + ImportService - maps ATDW record to Craft product entry
   | "atdw_category_mapping"
   | "atdw_entry_state"
   | "atdw_entry_link";

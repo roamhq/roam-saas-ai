@@ -18,6 +18,7 @@ import {
   generateExplanation,
   streamExplanation,
 } from "./explain/generator";
+import { retrieveContext } from "./knowledge/search";
 import WIDGET_JS from "./widget.js.txt";
 
 // CORS headers for chatbot frontends
@@ -169,6 +170,7 @@ interface ResolvedData {
   config: DomainConfig | null;
   trace: TraceStep[];
   targetProductIds: number[];
+  codeContext: string;
   timing: Record<string, number>;
   error?: Response;
 }
@@ -196,6 +198,9 @@ async function resolveData(
 
   const componentType = intent.componentType;
 
+  // Retrieve code context from AutoRAG (runs in parallel with DB work)
+  const codeContextPromise = retrieveContext(env, intent);
+
   // Resolve entities via DB
   t0 = Date.now();
   const db = createConnection(env, tenant);
@@ -208,7 +213,10 @@ async function resolveData(
     // -----------------------------------------------------------------------
     if (intent.domain === "atdw_import") {
       t0 = Date.now();
-      const atdwResult = await traceAtdwImport(db, schema, intent);
+      const [atdwResult, codeContext] = await Promise.all([
+        traceAtdwImport(db, schema, intent),
+        codeContextPromise,
+      ]);
       timing.filterChain = Date.now() - t0;
 
       return {
@@ -216,6 +224,7 @@ async function resolveData(
         config: atdwResult.config,
         trace: atdwResult.trace,
         targetProductIds: [],
+        codeContext,
         timing,
       };
     }
@@ -226,7 +235,7 @@ async function resolveData(
     const pageUri = intent.pageUri ?? body.pageUri;
     if (!pageUri) {
       return {
-        intent, config: null, trace: [], targetProductIds: [], timing,
+        intent, config: null, trace: [], targetProductIds: [], codeContext: "", timing,
         error: Response.json({
           explanation:
             "I need to know which page you're asking about. " +
@@ -246,7 +255,7 @@ async function resolveData(
       const availableTypes = [...new Set(allBlocks.map((b) => b.blockType))];
 
       return {
-        intent, config: null, trace: [], targetProductIds: [], timing,
+        intent, config: null, trace: [], targetProductIds: [], codeContext: "", timing,
         error: Response.json({
           explanation:
             `I couldn't find a "${componentType}" component on the page "${pageUri}". ` +
@@ -294,11 +303,14 @@ async function resolveData(
       });
     }
 
+    const codeContext = await codeContextPromise;
+
     return {
       intent,
       config: traceResult.config,
       trace: traceResult.trace,
       targetProductIds,
+      codeContext,
       timing,
     };
   } finally {
@@ -326,7 +338,8 @@ async function handleExplain(
       data.intent,
       data.config,
       data.trace,
-      data.targetProductIds
+      data.targetProductIds,
+      data.codeContext
     );
     data.timing.generation = Date.now() - t0;
 
@@ -401,7 +414,8 @@ async function handleExplainStream(
             data.intent,
             data.config,
             data.trace,
-            data.targetProductIds
+            data.targetProductIds,
+            data.codeContext
           );
 
           const reader = stream.getReader();

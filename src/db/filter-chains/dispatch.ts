@@ -9,11 +9,11 @@ import { traceProductsFilterChain } from "../filter-chain";
 import { traceGenericBlock } from "./generic";
 
 /**
- * Dispatch to the right tracer based on component type.
+ * Dispatch to the right data collector based on component type.
  *
- * Components with dedicated tracers get full filter chain analysis.
+ * Components with dedicated collectors get detailed data snapshots.
  * Everything else gets the generic block inspector which reports
- * field values and relations, deferring to the LLM + AI Search
+ * field values and relations, deferring to the LLM + AutoRAG
  * for interpretation.
  */
 export async function traceBlock(

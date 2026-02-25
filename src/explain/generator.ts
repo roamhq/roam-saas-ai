@@ -22,10 +22,11 @@ export async function generateExplanation(
   intent: ParsedIntent,
   config: DomainConfig | null,
   trace: TraceStep[],
-  targetProductIds: number[]
+  targetProductIds: number[],
+  codeContext: string = ""
 ): Promise<string> {
   const systemPrompt = buildSystemPrompt(intent.domain);
-  const userPrompt = buildUserPrompt(question, intent, config, trace, targetProductIds);
+  const userPrompt = buildUserPrompt(question, intent, config, trace, targetProductIds, codeContext);
 
   try {
     const result = await env.AI.run(TEXT_MODEL, {
@@ -61,10 +62,11 @@ export function streamExplanation(
   intent: ParsedIntent,
   config: DomainConfig | null,
   trace: TraceStep[],
-  targetProductIds: number[]
+  targetProductIds: number[],
+  codeContext: string = ""
 ): ReadableStream {
   const systemPrompt = buildSystemPrompt(intent.domain);
-  const userPrompt = buildUserPrompt(question, intent, config, trace, targetProductIds);
+  const userPrompt = buildUserPrompt(question, intent, config, trace, targetProductIds, codeContext);
 
   const encoder = new TextEncoder();
 
@@ -149,9 +151,13 @@ function buildUserPrompt(
   intent: ParsedIntent,
   config: DomainConfig | null,
   trace: TraceStep[],
-  targetProductIds: number[]
+  targetProductIds: number[],
+  codeContext: string = ""
 ): string {
   const traceSummary = formatTrace(trace);
+  const codeSection = codeContext
+    ? `\nRelevant source code (for your understanding - NEVER reference code, filenames, or function names in your response):\n${codeContext}\n`
+    : "";
 
   if (intent.domain === "atdw_import" && config && "domain" in config && config.domain === "atdw_import") {
     const atdwConfig = config as AtdwImportConfig;
@@ -163,8 +169,9 @@ function buildUserPrompt(
     prompt += `Location: ${atdwConfig.city ?? "unknown"} (postcode: ${atdwConfig.postcode ?? "unknown"})\n`;
     prompt += `Imported: ${atdwConfig.imported ? "Yes" : "No"}\n`;
     prompt += `Has website entry: ${atdwConfig.hasEntry ? "Yes" : "No"}\n`;
-    prompt += `\nHere's what the import process found:\n${traceSummary}\n`;
-    prompt += `\nExplain this to the client in plain, friendly language.`;
+    prompt += `\nHere's what we found in the data:\n${traceSummary}\n`;
+    prompt += codeSection;
+    prompt += `\nUsing the data above (and the source code for context on how the system works), explain this to the client in plain, friendly language. Do NOT mention code, files, functions, or variables.`;
     return prompt;
   }
 
@@ -178,8 +185,9 @@ function buildUserPrompt(
   }
 
   prompt += `\nHere's how this component is configured:\n${configSummary}\n`;
-  prompt += `\nHere's what happened when the page loaded:\n${traceSummary}\n`;
-  prompt += `\nExplain this to the client in plain, friendly language.`;
+  prompt += `\nHere's what the data shows:\n${traceSummary}\n`;
+  prompt += codeSection;
+  prompt += `\nUsing the data above (and the source code for context on how the system works), explain this to the client in plain, friendly language. Do NOT mention code, files, functions, or variables.`;
 
   return prompt;
 }
@@ -246,16 +254,13 @@ const stepLabels: Record<TraceStepName, string> = {
   sort: "Sorting",
   limit: "Display limit",
   block_config: "Component configuration",
-  // ATDW import steps - mirrors ProductService::createRecord() + ImportService
+  // ATDW import steps - data collection
   atdw_lookup: "ATDW product lookup",
   atdw_region_config: "Configured import regions",
-  atdw_postcode_match: "Postcode matching",
-  atdw_status_eval: "ATDW status evaluation",
-  atdw_fetch_eligibility: "Fetch eligibility",
-  atdw_data_delta: "Data change detection",
-  atdw_import_resolution: "Import decision",
+  atdw_postcode_match: "Postcode vs configured regions",
+  atdw_status_eval: "Record status and import state",
   atdw_category_mapping: "Category mapping",
-  atdw_entry_state: "Product entry processing",
+  atdw_entry_state: "Website entry state",
   atdw_entry_link: "Website listing",
 };
 

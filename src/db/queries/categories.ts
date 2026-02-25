@@ -1,15 +1,12 @@
 import type { DatabaseConnection } from "../../types";
 
 /**
- * Resolve category hierarchy: given a set of selected category IDs,
+ * Deduplicate category hierarchy: given a set of selected category IDs,
  * strip any that are ANCESTORS of another selected category.
  *
- * Mirrors the Twig logic:
- *   props.includeRegions|filter(c => not c.getDescendants().id(ids).exists())
- *
- * Translation: keep a category only if NONE of its descendants appear in the
- * selection. If both parent and child are selected, the parent is redundant
- * because the user chose the more specific child deliberately.
+ * Data normalisation: if both parent and child are selected, the parent
+ * is redundant because the user chose the more specific child deliberately.
+ * Without this, queries would return too-broad results from the parent.
  *
  * Uses Craft's nested set model (craft_structureelements.lft/rgt).
  */

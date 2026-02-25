@@ -12,7 +12,7 @@ import type {
  * These components don't have a data-driven filter chain - they render
  * whatever props the CMS gives them directly. We just report what's
  * configured: relations, field values, and let the LLM explain it
- * using the raw template from AI Search.
+ * using the template source retrieved by AutoRAG.
  */
 export async function traceGenericBlock(
   _db: DatabaseConnection,

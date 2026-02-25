@@ -1,10 +1,11 @@
 import type { DatabaseConnection, SchemaCache } from "../../types";
 
 /**
- * AND intersection of multiple relation queries.
+ * Collect products matching multiple relation dimensions simultaneously.
  * Products must be related to at least one element in EACH provided set.
  *
- * Used for the category + tier + taxonomy filter in the Products component.
+ * Each dimension (categories, tiers, taxonomy) is queried independently
+ * then intersected - products in the result match ALL active dimensions.
  */
 export async function findProductsByAndRelations(
   db: DatabaseConnection,
